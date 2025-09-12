@@ -1,12 +1,39 @@
 #!/usr/bin/env python3
 
 import rclpy
+import time
+import threading
 from rclpy.node import Node
-from swl_base_interfaces.srv import AppRequest
+from swl_base_interfaces.srv import BaseCommand, AppRequest
+from swl_shared_interfaces import DroneCommand
+from statemachine import StateMachine, State
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.task import Future
+
+class BaseStateMachine(StateMachine):
+    
+    # Define State
+    Idle = State(initial=True)
+    Home = State()
+
+    # Define transitions
+    station_homed = Idle.to(Home)
+
+    # Methods for 'on entering' new states
+    def on_enter_Idle(self):
+        """Called when entering Idle state"""
+        self.model.get_logger().info("System boot... homing station")
+        
+    def on_enter_Home(self):
+        """Called when entering Home state"""
+        self.model.get_logger().info("Entered HOME state - Station homed and ready")
 
 class BaseStationStateMachine(Node):
     def __init__(self):
         super().__init__('base_state_machine')
+        self.state_machine = BaseStateMachine(model=self)
+
+        self.callback_group = ReentrantCallbackGroup()
 
         # Service server for App Request
         self.app_request_service = self.create_service(
@@ -15,50 +42,147 @@ class BaseStationStateMachine(Node):
             self.handle_app_request
         )
 
+        # Service client for Arduino Node
+        self.station_command_client = self.create_client(
+            BaseCommand, 
+            '/base_station/command',
+            callback_group=self.callback_group
+        )
+
+        # Service client for Drone State Machine
+        self.drone_command_client = self.create_client(
+            DroneCommand,
+            'drone/command',
+            callback_group=self.callback_group
+        )
+
+        # Validate the command type
+        self.valid_commands = [
+            'abort_mission', 'start_mission', 'turn_left', 'turn_right',
+            'manual_mode', 'reroute', 'close_hatch', 'open_hatch',
+            'close_centering', 'open_centering', 'enable_charge', 'disable_charge' 'start_mission_patrol', 'continue',
+            'manual_open_hatch', 'manual_close_hatch', 'manual_centre', 'manual_uncentre', 'manual_enable_charge', 'manual_disable_charge'
+        ]
+
         self.get_logger().info('Base Station State Machine node started')
+        self.get_logger().info(f'Initial state: {self.state_machine.current_state.name}')
+        
+        # Wait for Arduino service to be available
+        self.station_command_client.wait_for_service(timeout_sec=10.0)
+        
+        # Start boot sequence in a separate thread
+        self.boot_thread = threading.Thread(target=self.boot_sequence, daemon=True)
+        self.boot_thread.start()
+
+    def boot_sequence(self):
+        """Boot sequence - automatically home the station if in Idle state"""
+        time.sleep(2)  # Wait for everything to initialize
+        
+        if self.state_machine.current_state.name == 'Idle':
+            self.get_logger().info('Starting boot sequence - homing station...')
+            self.home_station()
+
+    ########################################
+    # START - METHODS FOR SERVICE CALLS TO ARDUINO NODE
+    ########################################
+
+    def home_station_client(self):
+        """Send home command to Arduino"""
+        def home_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success:
+                    self.get_logger().info(f'Homing successful!')
+                    # Transition to Home state
+                    if self.state_machine.current_state.name == 'Idle':
+                        self.state_machine.station_homed()
+                else:
+                    self.get_logger().error(f'Homing failed! Arduino state: {response.state:03b}')
+                    self.get_logger().info('Retrying homing in 5 seconds...')
+                    # Could add retry logic here
+                    
+            except Exception as e:
+                self.get_logger().error(f'Home service call failed: {str(e)}')
+        
+        # Create and send the request
+        request = BaseCommand.Request()
+        request.command = 'home_station'
+        
+        future = self.station_command_client.call_async(request)
+        future.add_done_callback(home_callback)
+
+    ########################################
+    # START - METHODS FOR SERVICE CALLS TO DRONE STATE MACHINE
+    ########################################
+
+    def drone_command_client(self):
+        """Client to send drone commands"""
+        def drone_command_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success:# and drone state is Ready_To_Fly:
+                    self.get_logger().info(f'Mission uploaded successfully')
+                    # TODO transition to base station open state (# 100 : Doors open, arms uncentred, charger off)
+                    # arduino needs to be sent command
+                    # wait for arduino response 
+                    # once station in state 100 then send new drone command 'arm'
+                else:
+                    self.get_logger().error(f'Homing failed! Arduino state: {response.state:03b}')
+                    self.get_logger().info('Retrying homing in 5 seconds...')
+                    # TODO Could add retry logic here
+                    
+            except Exception as e:
+                self.get_logger().error(f'Home service call failed: {str(e)}')
+        
+        # Create and send the request
+        request = DroneCommand.Request()
+        request.command = 'home_station'
+        
+        future = self.station_command_client.call_async(request)
+        future.add_done_callback(drone_command_callback)
+        
+    ########################################
+    # END - METHODS FOR SERVICE CALLS TO DRONE STATE MACHINE
+    ########################################
+        
+
+    ########################################
+    # END - METHODS FOR SERVICE CALLS TO ARDUINO_NODE
+    ########################################
+
+    ########################################
+    # START - HANDLERS FOR SERVICE CALLS FROM API_RECEIVE
+    ########################################
 
     def handle_app_request(self, request, response):
         """Handle incoming app request service calls"""
 
-        self.get_logger().info('=== Received App Request ===')
-        self.get_logger().info(f'Command Type: {request.command_type}')
-        self.get_logger().info(f'Mission ID: {request.mission_id}')
-        self.get_logger().info(f'Number of Waypoints: {len(request.waypoints)}')
-
-        # Log waypoint details if present
-        for i, waypoint in enumerate(request.waypoints):
-            self.get_logger().info(f'Waypoint {i+1}: lat={waypoint.latitude}, lon={waypoint.longitude}, alt={waypoint.altitude}')
+        self.get_logger().info(f'Received app request: {request.command}')
         
-        # Validate the command type
-        valid_commands = [
-            'abort_mission', 'start_mission', 'turn_left', 'turn_right',
-            'manual_mode', 'reroute', 'close_hatch', 'open_hatch',
-            'close_centering', 'open_centering', 'start_mission_patrol', 'continue'
-        ]
-        
-        if request.command_type in valid_commands:
+        if request.command in self.valid_commands:
             response.success = True
-            self.get_logger().info(f'✅ Command "{request.command_type}" accepted')
+            self.get_logger().info(f'Command {request.command} accepted')
         else:
             response.success = False
-            self.get_logger().warn(f'❌ Unknown command "{request.command_type}"')
-            self.get_logger().info(f'Valid commands: {valid_commands}')
-        
-        self.get_logger().info('=== End Request ===\n')
+            self.get_logger().warn(f'Unknown command "{request.command}"')
         
         return response
+    
+    ########################################
+    # END - HANDLERS FOR SERVICE CALLS FROM API_RECEIVE
+    ########################################
 
 def main():
     rclpy.init()
     
-    test_server = BaseStationStateMachine()
+    base_station = BaseStationStateMachine()
     
     try:
-        rclpy.spin(test_server)
+        rclpy.spin(base_station)
     except KeyboardInterrupt:
-        test_server.get_logger().info('Service server shutting down...')
+        base_station.get_logger().info('Base Station State Machine shutting down...')
     finally:
-        test_server.destroy_node()
+        base_station.destroy_node()
         rclpy.shutdown()
 
 if __name__ == '__main__':

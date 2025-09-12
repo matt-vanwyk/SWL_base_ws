@@ -51,7 +51,7 @@ class APIReceiveNode(Node):
         
         try:
             async for message in websocket:
-                self.get_logger().info(f"Received WebSocket message: {message}")
+                self.get_logger().info("Received WebSocket message")
                 
                 try:
                     # Parse the JSON message

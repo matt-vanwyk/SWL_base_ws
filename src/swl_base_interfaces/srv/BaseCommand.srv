@@ -1,0 +1,14 @@
+# swl_base_interfaces/srv/BaseCommand.srv
+# state is a 3 bit mask defined as follows:
+# 000 : Doors closed, arms uncentred, charger off
+# 001 : Doors closed, arms uncentred, charger on
+# 011 : Doors closed, arms centred, charger on
+# 100 : Doors open, arms uncentred, charger off
+# 101 : Doors open, arms uncentred, charger on
+# 110 : Doors open, arms centred, charger off
+# 111 : Doors open, arms centred, charger on
+
+string command
+---
+bool success
+int32 state
