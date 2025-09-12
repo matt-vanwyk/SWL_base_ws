@@ -1,0 +1,5 @@
+string command_type
+swl_shared_interfaces/Waypoint[] waypoints
+string mission_id
+---
+bool success

@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+
+import rclpy
+import threading
+import asyncio
+import json
+import websockets
+from rclpy.node import Node
+from swl_base_interfaces.srv import AppRequest
+from swl_shared_interfaces.msg import Waypoint
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.task import Future
+
+class APIReceiveNode(Node):
+    def __init__(self):
+        super().__init__("api_receive")
+
+        self.callback_group = ReentrantCallbackGroup()
+        self.app_request_client = self.create_client(AppRequest, "/cloud/app_request", callback_group=self.callback_group)
+
+        self.websocket_server = None
+        self.get_logger().info("API Receive node started")
+
+    def call_api_request(self, request):
+        
+        def call_api_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success:
+                    self.get_logger().info(f'Base State Machine received API action request: {response.success}')
+                else:
+                    self.get_logger().error(f'API service call failed. Action not received by Base State Machine')
+            except Exception as e:
+                self.get_logger().error(f'Service call failed: {str(e)}')
+                #TODO add handle action request failure
+            
+        future = self.app_request_client.call_async(request)
+        future.add_done_callback(call_api_callback)
+
+    async def start(self):
+        self.websocket_server = await websockets.serve(
+            self.handle_websocket_message,
+            "0.0.0.0", 
+            8765
+        )
+        self.get_logger().info("WebSocket server started on ws://0.0.0.0:8765 (accessible from network)")
+
+    async def handle_websocket_message(self, websocket):
+        """Handle incoming WebSocket connections and messages"""
+        self.get_logger().info(f"New WebSocket connection from {websocket.remote_address}")
+        
+        try:
+            async for message in websocket:
+                self.get_logger().info(f"Received WebSocket message: {message}")
+                
+                try:
+                    # Parse the JSON message
+                    data = json.loads(message)
+                    
+                    # Create AppRequest message
+                    request = AppRequest.Request()
+                    request.command_type = data.get('command_type', '')
+                    request.mission_id = data.get('mission_id', '')
+                    
+                    # Handle waypoints if present
+                    waypoints_data = data.get('waypoints', [])
+                    request.waypoints = []
+                    
+                    for wp_data in waypoints_data:
+                        waypoint = Waypoint()
+                        waypoint.latitude = wp_data.get('latitude', 0.0)
+                        waypoint.longitude = wp_data.get('longitude', 0.0)
+                        waypoint.altitude = wp_data.get('altitude', 0.0)
+                        request.waypoints.append(waypoint)
+                    
+                    # Make the service call
+                    self.get_logger().info(f"Making service call with command: {request.command_type}")
+                    self.call_api_request(request)
+                    
+                    # Send acknowledgment back to WebSocket client
+                    response_msg = {
+                        "status": "received",
+                        "command_type": request.command_type,
+                        "mission_id": request.mission_id,
+                        "waypoint_count": len(request.waypoints)
+                    }
+                    await websocket.send(json.dumps(response_msg))
+                    
+                except json.JSONDecodeError:
+                    error_msg = {"error": "Invalid JSON format"}
+                    await websocket.send(json.dumps(error_msg))
+                    self.get_logger().error("Received invalid JSON from WebSocket")
+                    
+                except Exception as e:
+                    error_msg = {"error": f"Processing error: {str(e)}"}
+                    await websocket.send(json.dumps(error_msg))
+                    self.get_logger().error(f"Error processing WebSocket message: {str(e)}")
+                    
+        except websockets.exceptions.ConnectionClosed:
+            self.get_logger().info(f"WebSocket connection closed for {websocket.remote_address}")
+        except Exception as e:
+            self.get_logger().error(f"WebSocket error: {str(e)}")
+
+async def spin(node: Node):
+    def _spin_func():
+        while rclpy.ok():
+            rclpy.spin_once(node)
+        node.get_logger().info("ROS 2 spin thread finished")
+
+    spin_thread = threading.Thread(target=_spin_func, daemon=True)
+    spin_thread.start()
+    try:
+        while rclpy.ok():
+            await asyncio.sleep(1.0)
+    finally:
+        node.get_logger().info("Waiting for ROS 2 spin thread to finish")
+        spin_thread.join()
+
+def main():
+    rclpy.init()
+    api_node = APIReceiveNode()
+    
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(api_node.start())
+      
+    try:
+        loop.run_until_complete(spin(api_node))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if api_node.websocket_server:
+            loop.run_until_complete(api_node.websocket_server.close())
+        api_node.destroy_node()
+        rclpy.shutdown()
+        loop.close()
+
+if __name__ == '__main__':
+    main()
