@@ -61,6 +61,9 @@ class ArduinoNode(Node):
             # Simulate failure - Arduino stays in current state
             self.get_logger().warn(f'[SIMULATION] Arduino responded: {self.current_state:03b} (FAILED TO CHANGE)')
             return self.current_state
+
+        # self.current_state = 5
+        # return self.current_state
         
     #####################################
     # SIMULATION
@@ -71,35 +74,29 @@ class ArduinoNode(Node):
     ########################################
 
     def handle_station_command(self, request, response):
-        """Function to send commands to Arduino"""
-        self.get_logger().info(f'Received station command: {request.command}')
+        """Function to send desired state to Arduino"""
+        self.get_logger().info(f'Received command: {request.command}')
         
         try:
+            target_state = None
+            
             if request.command == 'home_station':
-                target_state = 0b011  # 011: Doors closed, arms centred, charger on
-                
-                self.get_logger().info('Homing station')
-
-                #TODO actually send serial bitmask and wait for response
-                # Send serial message to arduino (simulated)
+                target_state = 0b011  # Home position
+            elif request.command == 'prepare_for_mission':
+                target_state = 0b100  # Doors open, arms uncentered, charger off
+            # Add other commands as needed
+            
+            if target_state is not None:
+                # Send desired state to Arduino (simulated)
                 received_state = self.simulate_serial_communication(target_state)
                 
-                # Check if received state matches target state
-                if received_state == target_state:
-                    response.state = received_state
-                    response.success = True
-                    self.get_logger().info(f'Station homing succeeded! Current state: {received_state:03b}')
-                else:
-                    response.state = received_state
-                    response.success = False
-                    self.get_logger().warn(f'Station homing failed! Expected: {target_state:03b}, received: {received_state:03b}')
-            
-            elif request.command == 'get_status':
-                # Just return current state without changing anything
-                response.state = self.current_state
-                response.success = True
-                self.get_logger().info(f'Status request - Current state: {self.current_state:03b}')
+                response.state = received_state
+                response.success = (received_state == target_state)
                 
+                if response.success:
+                    self.get_logger().info(f'Command succeeded - State: {received_state:03b}')
+                else:
+                    self.get_logger().warn(f'Command failed - Expected: {target_state:03b}, Got: {received_state:03b}')
             else:
                 response.state = self.current_state
                 response.success = False

@@ -5,7 +5,7 @@ import time
 import threading
 from rclpy.node import Node
 from swl_base_interfaces.srv import BaseCommand, AppRequest
-from swl_shared_interfaces import DroneCommand
+from swl_shared_interfaces.srv import DroneCommand
 from statemachine import StateMachine, State
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.task import Future
@@ -80,13 +80,13 @@ class BaseStationStateMachine(Node):
         
         if self.state_machine.current_state.name == 'Idle':
             self.get_logger().info('Starting boot sequence - homing station...')
-            self.home_station()
+            self.home_station_call()
 
     ########################################
     # START - METHODS FOR SERVICE CALLS TO ARDUINO NODE
     ########################################
 
-    def home_station_client(self):
+    def home_station_call(self):
         """Send home command to Arduino"""
         def home_callback(future: Future):
             try:
@@ -98,7 +98,6 @@ class BaseStationStateMachine(Node):
                         self.state_machine.station_homed()
                 else:
                     self.get_logger().error(f'Homing failed! Arduino state: {response.state:03b}')
-                    self.get_logger().info('Retrying homing in 5 seconds...')
                     # Could add retry logic here
                     
             except Exception as e:
@@ -115,7 +114,7 @@ class BaseStationStateMachine(Node):
     # START - METHODS FOR SERVICE CALLS TO DRONE STATE MACHINE
     ########################################
 
-    def drone_command_client(self):
+    def drone_command_call(self):
         """Client to send drone commands"""
         def drone_command_callback(future: Future):
             try:
@@ -127,16 +126,15 @@ class BaseStationStateMachine(Node):
                     # wait for arduino response 
                     # once station in state 100 then send new drone command 'arm'
                 else:
-                    self.get_logger().error(f'Homing failed! Arduino state: {response.state:03b}')
-                    self.get_logger().info('Retrying homing in 5 seconds...')
+                    self.get_logger().error(f'Mission upload failed! Drone or base station in incorrect state')
                     # TODO Could add retry logic here
                     
             except Exception as e:
-                self.get_logger().error(f'Home service call failed: {str(e)}')
+                self.get_logger().error(f'Mission upload service call failed: {str(e)}')
         
         # Create and send the request
         request = DroneCommand.Request()
-        request.command = 'home_station'
+        # request.command will depend on the command sent from the api
         
         future = self.station_command_client.call_async(request)
         future.add_done_callback(drone_command_callback)
@@ -158,6 +156,12 @@ class BaseStationStateMachine(Node):
         """Handle incoming app request service calls"""
 
         self.get_logger().info(f'Received app request: {request.command}')
+        # Here we need to check the state of the drone and base station 
+        # Instance, if the command sent is a start_mission command, we should 
+        # first check if the base station state is 011 and drone state is Ready_To_Fly
+        # before sending the mission to the drone and uploading. Then we need to check 
+        # that the base station state is 100 before arming the drone to take off
+        # if the command is reroute then we need to check the station is
         
         if request.command in self.valid_commands:
             response.success = True
