@@ -19,6 +19,15 @@ class APIReceiveNode(Node):
         self.app_request_client = self.create_client(AppRequest, "/cloud/app_request", callback_group=self.callback_group)
 
         self.websocket_server = None
+
+        # Validate the command type
+        self.valid_commands = [
+            'abort_mission', 'start_mission', 'turn_left', 'turn_right',
+            'manual_mode', 'reroute', 'close_hatch', 'open_hatch',
+            'close_centering', 'open_centering', 'enable_charge', 'disable_charge' 'start_mission_patrol', 'continue',
+            'manual_open_hatch', 'manual_close_hatch', 'manual_centre', 'manual_uncentre', 'manual_enable_charge', 'manual_disable_charge'
+        ]
+
         self.get_logger().info("API Receive node started")
 
     def call_api_request(self, request):
@@ -56,10 +65,26 @@ class APIReceiveNode(Node):
                 try:
                     # Parse the JSON message
                     data = json.loads(message)
-                    
+
+                    # Extract and validate command_type
+                    command_type = data.get('command_type', '')
+
+                    # Validate command type
+                    if not command_type:
+                        error_msg = {"error": "Missing command_type field"}
+                        await websocket.send(json.dumps(error_msg))
+                        self.get_logger().error("Received message without command_type")
+                        continue
+
+                    if command_type not in self.valid_commands:
+                        error_msg = {"error": f"Unknown command_type: {command_type}"}
+                        await websocket.send(json.dumps(error_msg))
+                        self.get_logger().error(f"Received unknown command_type: {command_type}")
+                        continue
+                
                     # Create AppRequest message
                     request = AppRequest.Request()
-                    request.command_type = data.get('command_type', '')
+                    request.command_type = command_type
                     request.mission_id = data.get('mission_id', '')
                     
                     # Handle waypoints if present

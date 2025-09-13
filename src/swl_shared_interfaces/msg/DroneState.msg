@@ -1,0 +1,19 @@
+# swl_shared_interfaces/msg/DroneState.msg
+
+std_msgs/Header header
+float64 latitude
+float64 longitude
+float32 altitude
+bool armed
+string flight_mode
+bool is_in_air
+float64 battery_percentage
+int32 num_satellites
+string landed_state
+float64 velocity_x
+float64 velocity_y
+float64 velocity_z
+string drone_id
+float64 current_yaw
+bool mission_complete
+string current_state

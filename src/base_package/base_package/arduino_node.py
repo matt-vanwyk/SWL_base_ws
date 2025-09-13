@@ -43,27 +43,13 @@ class ArduinoNode(Node):
 
     def simulate_serial_communication(self, target_state):
         """Simulate sending command to Arduino and receiving response"""
-        self.get_logger().info(f'[SIMULATION] Sending command to Arduino: {target_state:03b}')
         
-        # Simulate Arduino processing time
-        time.sleep(1.0)
-        
-        # Simulate Arduino response - for simulation, let's say it succeeds 90% of the time
-        import random
-        success_rate = 0.9  # 90% success rate for testing
-        
-        if random.random() < success_rate:
-            # Simulate successful state change
-            self.current_state = target_state
-            self.get_logger().info(f'[SIMULATION] Arduino responded: {self.current_state:03b} (SUCCESS)')
-            return self.current_state
-        else:
-            # Simulate failure - Arduino stays in current state
-            self.get_logger().warn(f'[SIMULATION] Arduino responded: {self.current_state:03b} (FAILED TO CHANGE)')
-            return self.current_state
+        #Test for successful moving of the station
+        current_state = target_state
 
-        # self.current_state = 5
-        # return self.current_state
+        #Test for station moving failure
+        # current_state = 100000000000
+        return current_state
         
     #####################################
     # SIMULATION
@@ -82,7 +68,7 @@ class ArduinoNode(Node):
             
             if request.command == 'home_station':
                 target_state = 0b011  # Home position
-            elif request.command == 'prepare_for_mission':
+            elif request.command == 'prepare_for_takeoff':
                 target_state = 0b100  # Doors open, arms uncentered, charger off
             # Add other commands as needed
             
@@ -110,7 +96,7 @@ class ArduinoNode(Node):
         return response
     
     ########################################
-    # START - HANDLERS FOR SERVICE CALLS FROM BASE_STATE_MACHINE
+    # END - HANDLERS FOR SERVICE CALLS FROM BASE_STATE_MACHINE
     ########################################
     
 def main():

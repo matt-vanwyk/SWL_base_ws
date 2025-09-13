@@ -1,3 +1,5 @@
+# swl_shared_interfaces/srv/DroneCommand.srv
+
 string command_type
 Waypoint[] waypoints
 string drone_id
