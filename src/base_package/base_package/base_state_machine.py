@@ -4,11 +4,12 @@ import rclpy
 import time
 import threading
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
 from swl_base_interfaces.srv import BaseCommand, AppRequest
 from swl_shared_interfaces.srv import DroneCommand
 from swl_shared_interfaces.msg import DroneState
 from statemachine import StateMachine, State
-from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.task import Future
 
 class BaseStateMachine(StateMachine):
@@ -26,15 +27,14 @@ class BaseStateMachine(StateMachine):
     def on_enter_Idle(self):
         """Called when entering Idle state - start homing sequence"""
         self.model.get_logger().info("System boot... homing station")
-        # Automatically start homing after a brief delay (handled in boot_sequence)
         
     def on_enter_Home(self):
         """Called when entering Home state - station is ready"""
-        self.model.get_logger().info("Homing successful! Entered HOME state - Station homed and ready for missions")
+        self.model.get_logger().info("State change: IDLE -> HOME")
 
     def on_enter_Ready_For_Takeoff(self):
         """Called when entering Ready_For_Takeoff state - upload mission to drone"""
-        self.model.get_logger().info("Entered READY_FOR_TAKEOFF state - Station doors open, arms uncentred, charger off...uploading mission to drone")
+        self.model.get_logger().info("State change: HOME -> READY_FOR_TAKEOFF")
         self.model.upload_mission_to_drone()
 
 class BaseStationStateMachine(Node):
@@ -42,34 +42,40 @@ class BaseStationStateMachine(Node):
         super().__init__('base_state_machine')
         self.state_machine = BaseStateMachine(model=self)
 
-        self.callback_group = ReentrantCallbackGroup()
+        # Create callback groups for different operations
+        self.service_callback_group = ReentrantCallbackGroup()
+        self.client_callback_group = ReentrantCallbackGroup()
+        self.subscription_callback_group = MutuallyExclusiveCallbackGroup()
 
-        # Service server for App Request
+        # Service server for App Request (uses reentrant for potential nested calls)
         self.app_request_service = self.create_service(
             AppRequest,
             "/cloud/app_request",
-            self.handle_app_request
+            self.handle_app_request,
+            callback_group=self.service_callback_group
         )
 
-        # Service client for Arduino Node
+        # Service client for Arduino Node (uses reentrant for nested calls)
         self.station_command_client = self.create_client(
             BaseCommand, 
             '/base_station/command',
-            callback_group=self.callback_group
+            callback_group=self.client_callback_group
         )
 
-        # Service client for Drone State Machine
+        # Service client for Drone State Machine (uses reentrant for nested calls)
         self.drone_command_client = self.create_client(
             DroneCommand,
             'drone/command',
-            callback_group=self.callback_group
+            callback_group=self.client_callback_group
         )
 
+        # Drone state subscriber
         self.drone_state_subscriber = self.create_subscription(
             DroneState,
             'drone/state',
             self.drone_state_callback,
-            10
+            10,
+            callback_group=self.subscription_callback_group
         )
 
         # Mission variables
@@ -80,8 +86,18 @@ class BaseStationStateMachine(Node):
         self.get_logger().info('Base Station State Machine node started')
         self.get_logger().info(f'Initial state: {self.state_machine.current_state.name}')
         
-        # Wait for Arduino service to be available
-        self.station_command_client.wait_for_service(timeout_sec=10.0)
+        # Wait for services to be available
+        self.get_logger().info('Waiting for Arduino service...')
+        if not self.station_command_client.wait_for_service(timeout_sec=10.0):
+            self.get_logger().error('Arduino service not available!')
+        else:
+            self.get_logger().info('Arduino service connected')
+
+        self.get_logger().info('Waiting for Drone command service...')
+        if not self.drone_command_client.wait_for_service(timeout_sec=10.0):
+            self.get_logger().error('Drone command service not available!')
+        else:
+            self.get_logger().info('Drone command service connected')
         
         # Start boot sequence in a separate thread
         self.boot_thread = threading.Thread(target=self.boot_sequence, daemon=True)
@@ -134,7 +150,7 @@ class BaseStationStateMachine(Node):
             try:
                 response = future.result()
                 if response.success and response.state == 0b100:
-                    self.get_logger().info('Base station hardware prepared (state 100) - triggering state transition')
+                    self.get_logger().info('Station prepared for takeoff!')
                     # Trigger state machine transition (which will automatically call upload_mission_to_drone)
                     self.state_machine.prepare_for_takeoff()
                 else:
@@ -169,8 +185,8 @@ class BaseStationStateMachine(Node):
                 response = future.result()
                 if response.success:
                     self.get_logger().info(f'Mission {self.current_mission_id} successfully uploaded to drone!')
-                    self.get_logger().info('Next: Ready for drone arming and launch...')
-                    # TODO: Next state transition (when we add arm/takeoff states)
+                    self.get_logger().info('Next: Ready to transition to Mission_In_Progress state (000) when drone at altitude of 8m')
+                    # TODO: Next state transition (when we add a Mission_In_Progress state)
                 else:
                     self.get_logger().error(f'Mission upload failed for mission {self.current_mission_id}')
                     # TODO: Handle mission upload failure - maybe close station and retry
@@ -185,7 +201,6 @@ class BaseStationStateMachine(Node):
             drone_request.waypoints = self.current_waypoints
             drone_request.drone_id = self.current_drone_state.drone_id if self.current_drone_state else "UNKNOWN_DRONE"
             drone_request.base_state = self.state_machine.current_state.name
-            drone_request.yaw_cw = False
 
             future = self.drone_command_client.call_async(drone_request)
             future.add_done_callback(mission_upload_callback)
@@ -204,15 +219,17 @@ class BaseStationStateMachine(Node):
         self.get_logger().info(f'Received app request: {request.command_type}')
         
         if request.command_type == 'start_mission':
-            response.success = self.handle_start_mission(request)
+            response.success = self.handle_start_mission_sync(request)
+        elif request.command_type == 'pan_right':
+            response.success = self.handle_pan_right(request)
         else:
             response.success = True
             self.get_logger().info(f'Command {request.command_type} acknowledged (not yet implemented)')
         
         return response
     
-    def handle_start_mission(self, request):
-        """Validate mission and initiate mission sequence"""
+    def handle_start_mission_sync(self, request):
+        """Validate mission and initiate mission sequence - synchronous to ensure proper response"""
         
         # Step 1: Validate base station state
         if self.state_machine.current_state.name != 'Home':
@@ -247,22 +264,122 @@ class BaseStationStateMachine(Node):
         self.current_waypoints = request.waypoints
 
         # Step 6: Log mission details
-        self.get_logger().info(f'All validations passed! Starting mission preparation for mission_id: {request.mission_id}')
+        self.get_logger().info(f'Starting mission preparation for {request.mission_id}')
         
-        self.initiate_station_preparation_for_takeoff()
+        # Step 7: Synchronously prepare station and wait for completion
+        return self.initiate_station_preparation_sync()
+    
+    def initiate_station_preparation_sync(self):
+        """Synchronously prepare station for takeoff and wait for completion"""
         
+        success_event = threading.Event()
+        preparation_success = [False]
+        error_message = ['']
+
+        def station_prepare_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success and response.state == 0b100:
+                    self.get_logger().info('Base station hardware prepared for takeoff')
+                    self.state_machine.prepare_for_takeoff()
+                    preparation_success[0] = True
+                else:
+                    self.get_logger().error(f'Failed to prepare base station hardware. Expected state 100, got: {response.state:03b}')
+                    error_message[0] = f'Hardware preparation failed - state: {response.state:03b}'
+                    
+            except Exception as e:
+                self.get_logger().error(f'Station preparation service call failed: {str(e)}')
+                error_message[0] = str(e)
+            finally:
+                success_event.set()
+
+        try:
+            # Create Arduino command to prepare for takeoff
+            station_request = BaseCommand.Request()
+            station_request.command = 'prepare_for_takeoff'
+
+            # Make the async service call
+            future = self.station_command_client.call_async(station_request)
+            future.add_done_callback(station_prepare_callback)
+
+            self.get_logger().info('Station preparation request sent to Arduino')
+            
+            # Wait for the async call to complete (with timeout)
+            if success_event.wait(timeout=30.0):  # 30 second timeout
+                if preparation_success[0]:
+                    return True
+                else:
+                    self.get_logger().error(f'Station preparation failed: {error_message[0]}')
+                    return False
+            else:
+                self.get_logger().error('Station preparation timed out!')
+                if not future.done():
+                    future.cancel()
+                return False
+            
+        except Exception as e:
+            self.get_logger().error(f'Failed to create station preparation request: {str(e)}')
+            return False
+        
+    def handle_pan_right(self, request):
+        """Validate drone state before panning and sending command to drone"""
+        # Step 1: Validate drone state
+        if self.current_drone_state is None:
+            self.get_logger().error('No drone state - drone not connected?')
+            return False
+        
+        #Step 2: Check drone state is Mission_In_Progress
+        if self.current_drone_state.current_state != 'Mission in progress':
+            self.get_logger().error(f'Drone must be in Mission in Progress state - current: {self.current_drone_state.current_state}')
+            return False
+        
+        # Validate yaw_cw field
+        if request.yaw_cw == 0.0:
+            self.get_logger().error('Invalid yaw_cw value - must be non-zero')
+            return False
+        
+        # Limit yaw to reasonable range
+        if abs(request.yaw_cw) > 180.0:
+            self.get_logger().error(f'Yaw value too large: {request.yaw_cw}° (max ±180°)')
+            return False
+        
+        drone_request = DroneCommand.Request()
+        drone_request.command_type = request.command_type  # 'pan_right'
+        drone_request.drone_id = self.current_drone_state.drone_id
+        drone_request.yaw_cw = request.yaw_cw # positive = right and negative = left
+
+        def pan_callback(future):
+            try:
+                response = future.result()
+                if response.success:
+                    self.get_logger().info(f'Pan command executed: {abs(request.yaw_cw):.1f}°')
+                else:
+                    self.get_logger().warn(f'Pan command failed: {request.command_type}')
+            except Exception as e:
+                self.get_logger().error(f'Pan service call failed: {str(e)}')
+        
+        future = self.drone_command_client.call_async(drone_request)
+        future.add_done_callback(pan_callback)
+
+        self.get_logger().info(f'Pan command sent to drone: {request.yaw_cw}°')
         return True
 
 def main():
     rclpy.init()
     
+    # Create the node
     base_station = BaseStationStateMachine()
     
+    # Create MultiThreadedExecutor with multiple threads
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(base_station)
+    
     try:
-        rclpy.spin(base_station)
+        executor.spin()
     except KeyboardInterrupt:
         base_station.get_logger().info('Base Station State Machine shutting down...')
     finally:
+        executor.shutdown()
         base_station.destroy_node()
         rclpy.shutdown()
 

@@ -22,7 +22,7 @@ class APIReceiveNode(Node):
 
         # Validate the command type
         self.valid_commands = [
-            'abort_mission', 'start_mission', 'turn_left', 'turn_right',
+            'abort_mission', 'start_mission', 'pan_left', 'pan_right',
             'manual_mode', 'reroute', 'close_hatch', 'open_hatch',
             'close_centering', 'open_centering', 'enable_charge', 'disable_charge' 'start_mission_patrol', 'continue',
             'manual_open_hatch', 'manual_close_hatch', 'manual_centre', 'manual_uncentre', 'manual_enable_charge', 'manual_disable_charge'
@@ -97,6 +97,8 @@ class APIReceiveNode(Node):
                         waypoint.longitude = wp_data.get('longitude', 0.0)
                         waypoint.altitude = wp_data.get('altitude', 0.0)
                         request.waypoints.append(waypoint)
+
+                    request.yaw_cw = data.get('yaw_cw', 0.0)
                     
                     # Make the service call
                     self.get_logger().info(f"Making service call with command: {request.command_type}")
@@ -107,7 +109,8 @@ class APIReceiveNode(Node):
                         "status": "received",
                         "command_type": request.command_type,
                         "mission_id": request.mission_id,
-                        "waypoint_count": len(request.waypoints)
+                        "waypoint_count": len(request.waypoints),
+                        "yaw_cw": request.yaw_cw
                     }
                     await websocket.send(json.dumps(response_msg))
                     

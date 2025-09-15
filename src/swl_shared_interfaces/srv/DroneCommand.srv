@@ -4,6 +4,6 @@ string command_type
 Waypoint[] waypoints
 string drone_id
 string base_state
-bool yaw_cw
+float64 yaw_cw
 ---
 bool success
