@@ -34,7 +34,7 @@ class BaseStateMachine(StateMachine):
 
     def on_enter_Ready_For_Takeoff(self):
         """Called when entering Ready_For_Takeoff state - upload mission to drone"""
-        self.model.get_logger().info("Entered READY_FOR_TAKEOFF state - Station doors open, uploading mission to drone")
+        self.model.get_logger().info("Entered READY_FOR_TAKEOFF state - Station doors open, arms uncentred, charger off...uploading mission to drone")
         self.model.upload_mission_to_drone()
 
 class BaseStationStateMachine(Node):
@@ -224,7 +224,7 @@ class BaseStationStateMachine(Node):
             self.get_logger().error('Cannot start mission - no drone state received. Is drone connected?')
             return False
         
-        if self.current_drone_state.current_state != 'Ready_To_Fly':
+        if self.current_drone_state.current_state != 'Ready to fly':
             self.get_logger().error(f'Cannot start mission - drone not in Ready_To_Fly state. Current drone state: {self.current_drone_state.current_state}')
             return False
         
