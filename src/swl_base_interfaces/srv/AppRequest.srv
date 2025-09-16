@@ -1,3 +1,5 @@
+# swl_shared_interfaces/srv/AppRequest.srv
+
 string command_type
 swl_shared_interfaces/Waypoint[] waypoints
 string mission_id
