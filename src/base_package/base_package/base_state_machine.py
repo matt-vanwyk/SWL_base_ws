@@ -352,11 +352,11 @@ class BaseStationStateMachine(Node):
             try:
                 response = future.result()
                 if response.success:
-                    self.get_logger().info(f'Pan command executed: {abs(request.yaw_cw):.1f}°')
+                    self.get_logger().info('Pan command received at drone state machine')
                 else:
-                    self.get_logger().warn(f'Pan command failed: {request.command_type}')
+                    self.get_logger().warn('Failed to send pan command to drone state machine')
             except Exception as e:
-                self.get_logger().error(f'Pan service call failed: {str(e)}')
+                self.get_logger().error(f'Pan service call to drone state machine failed: {str(e)}')
         
         future = self.drone_command_client.call_async(drone_request)
         future.add_done_callback(pan_callback)
