@@ -220,8 +220,8 @@ class BaseStationStateMachine(Node):
         
         if request.command_type == 'start_mission':
             response.success = self.handle_start_mission_sync(request)
-        elif request.command_type == 'pan_right':
-            response.success = self.handle_pan_right(request)
+        elif request.command_type == 'pan':
+            response.success = self.handle_pan(request)
         else:
             response.success = True
             self.get_logger().info(f'Command {request.command_type} acknowledged (not yet implemented)')
@@ -321,7 +321,7 @@ class BaseStationStateMachine(Node):
             self.get_logger().error(f'Failed to create station preparation request: {str(e)}')
             return False
         
-    def handle_pan_right(self, request):
+    def handle_pan(self, request):
         """Validate drone state before panning and sending command to drone"""
         # Step 1: Validate drone state
         if self.current_drone_state is None:
@@ -344,7 +344,7 @@ class BaseStationStateMachine(Node):
             return False
         
         drone_request = DroneCommand.Request()
-        drone_request.command_type = request.command_type  # 'pan_right'
+        drone_request.command_type = request.command_type  # 'pan'
         drone_request.drone_id = self.current_drone_state.drone_id
         drone_request.yaw_cw = request.yaw_cw # positive = right and negative = left
 
