@@ -18,10 +18,12 @@ class BaseStateMachine(StateMachine):
     Idle = State(initial=True)
     Home = State()
     Ready_For_Takeoff = State()
+    Mission_In_Progress = State()
 
     # Define transitions
     station_homed = Idle.to(Home)
     prepare_for_takeoff = Home.to(Ready_For_Takeoff)
+    mission_started = Ready_For_Takeoff.to(Mission_In_Progress)
 
     # Methods for 'on entering' new states
     def on_enter_Idle(self):
@@ -36,6 +38,11 @@ class BaseStateMachine(StateMachine):
         """Called when entering Ready_For_Takeoff state - upload mission to drone"""
         self.model.get_logger().info("State change: HOME -> READY_FOR_TAKEOFF")
         self.model.upload_mission_to_drone()
+
+    def on_enter_Mission_In_Progress(self):
+        """Called when entering Mission_In_Progress state - close station doors"""
+        self.model.get_logger().info("State change: READY_FOR_TAKEOFF -> MISSION_IN_PROGRESS")
+        self.model.secure_station_for_mission()
 
 class BaseStationStateMachine(Node):
     def __init__(self):
@@ -119,6 +126,22 @@ class BaseStationStateMachine(Node):
         """Callback to receive and store current drone state"""
         self.current_drone_state = msg
 
+        self.check_mission_progress_transition()
+
+    def check_mission_progress_transition(self):
+        """Check if we should transition based on drone state (could be used later when returning to the base station)"""
+        
+        if self.state_machine.current_state.name != 'Ready for takeoff':
+            return
+        
+        if self.current_drone_state is None:
+            return
+
+        # Check the drone state and altitude (drone state changes to Mission in progress when higher than 8m)
+        if (self.current_drone_state.current_state == 'Mission in progress' and self.current_drone_state.altitude >= 8.0):
+            self.get_logger().info('Drone has taken off successfully... Closing station doors')
+            self.state_machine.mission_started()
+
     ########################################
     # ARDUINO SERVICE CLIENTS
     ########################################
@@ -174,6 +197,30 @@ class BaseStationStateMachine(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to create station preparation request: {str(e)}')
 
+    def secure_station_for_mission(self):
+        """Secure the station when mission starts - close doors and leave arms uncentred and charger off (state 000)"""
+        def secure_station_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success and response.state == 0b000:
+                    self.get_logger().info('Station secured - doors closed')
+                else:
+                    self.get_logger().error(f'Failed to secure station. Expected state 000, got: {response.state:03b}')
+                    # TODO: Handle securing failure - maybe retry or alert
+
+            except Exception as e:
+                self.get_logger().error(f'Station secure service call failed: {str(e)}')
+
+        try:
+            station_request = BaseCommand.Request()
+            station_request.command = 'secure_station'
+
+            future = self.station_command_client.call_async(station_request)
+            future.add_done_callback(secure_station_callback)
+
+        except Exception as e:
+            self.get_logger().error(f'Failed to create secure station request: {str(e)}')
+
     ########################################
     # DRONE SERVICE CLIENTS
     ########################################
@@ -185,8 +232,6 @@ class BaseStationStateMachine(Node):
                 response = future.result()
                 if response.success:
                     self.get_logger().info(f'Mission {self.current_mission_id} successfully uploaded to drone!')
-                    self.get_logger().info('Next: Ready to transition to Mission_In_Progress state (000) when drone at altitude of 8m')
-                    # TODO: Next state transition (when we add a Mission_In_Progress state)
                 else:
                     self.get_logger().error(f'Mission upload failed for mission {self.current_mission_id}')
                     # TODO: Handle mission upload failure - maybe close station and retry

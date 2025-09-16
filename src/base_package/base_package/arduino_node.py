@@ -70,7 +70,8 @@ class ArduinoNode(Node):
                 target_state = 0b011  # Home position
             elif request.command == 'prepare_for_takeoff':
                 target_state = 0b100  # Doors open, arms uncentered, charger off
-            # Add other commands as needed
+            elif request.command == 'secure_station':
+                target_state = 0b000 # Doors closed, arms uncentered, charger off
             
             if target_state is not None:
                 # Send desired state to Arduino (simulated)
