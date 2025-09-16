@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'api_receive = base_package.api_receive:main',
+            'api_post = base_package.api_post:main',
             'base_state_machine = base_package.base_state_machine:main',
             'arduino_node = base_package.arduino_node:main'
         ],

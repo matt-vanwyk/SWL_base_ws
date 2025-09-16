@@ -42,7 +42,6 @@ class BaseStateMachine(StateMachine):
     def on_enter_Mission_In_Progress(self):
         """Called when entering Mission_In_Progress state - close station doors"""
         self.model.get_logger().info("State change: READY_FOR_TAKEOFF -> MISSION_IN_PROGRESS")
-        self.model.secure_station_for_mission()
 
 class BaseStationStateMachine(Node):
     def __init__(self):
@@ -140,7 +139,7 @@ class BaseStationStateMachine(Node):
         # Check the drone state and altitude (drone state changes to Mission in progress when higher than 8m)
         if (self.current_drone_state.current_state == 'Mission in progress' and self.current_drone_state.altitude >= 8.0):
             self.get_logger().info('Drone has taken off successfully... Closing station doors')
-            self.state_machine.mission_started()
+            self.secure_station_for_mission()
 
     ########################################
     # ARDUINO SERVICE CLIENTS
@@ -204,6 +203,7 @@ class BaseStationStateMachine(Node):
                 response = future.result()
                 if response.success and response.state == 0b000:
                     self.get_logger().info('Station secured - doors closed')
+                    self.state_machine.mission_started()
                 else:
                     self.get_logger().error(f'Failed to secure station. Expected state 000, got: {response.state:03b}')
                     # TODO: Handle securing failure - maybe retry or alert
@@ -224,20 +224,29 @@ class BaseStationStateMachine(Node):
     ########################################
     # DRONE SERVICE CLIENTS
     ########################################
-                
+
     def upload_mission_to_drone(self):
         """Upload mission to drone - called automatically when entering Ready_For_Takeoff state"""
+        
+        # Use threading event to wait for drone response synchronously
+        success_event = threading.Event()
+        upload_success = [False]
+        error_message = ['']
+
         def mission_upload_callback(future: Future):
             try:
                 response = future.result()
                 if response.success:
                     self.get_logger().info(f'Mission {self.current_mission_id} successfully uploaded to drone!')
+                    upload_success[0] = True
                 else:
                     self.get_logger().error(f'Mission upload failed for mission {self.current_mission_id}')
-                    # TODO: Handle mission upload failure - maybe close station and retry
-                    
+                    error_message[0] = 'Drone state machine rejected mission upload'
             except Exception as e:
                 self.get_logger().error(f'Mission upload service call failed: {str(e)}')
+                error_message[0] = str(e)
+            finally:
+                success_event.set()
 
         try:
             # Create drone command request
@@ -250,11 +259,23 @@ class BaseStationStateMachine(Node):
             future = self.drone_command_client.call_async(drone_request)
             future.add_done_callback(mission_upload_callback)
 
-            self.get_logger().info(f'Mission upload request sent to drone...')
+            self.get_logger().info(f'Mission upload request sent to drone - waiting for completion...')
+            
+            # Wait for the async call to complete (with timeout)
+            if success_event.wait(timeout=45.0):  # 45 second timeout (longer than drone's 30s)
+                if upload_success[0]:
+                    self.get_logger().info('Mission upload sequence completed successfully!')
+                else:
+                    self.get_logger().error(f'Mission upload sequence failed: {error_message[0]}')
+                    # TODO: Handle mission upload failure - maybe close station and retry
+            else:
+                self.get_logger().error('Mission upload sequence timed out!')
+                if not future.done():
+                    future.cancel()
 
         except Exception as e:
             self.get_logger().error(f'Failed to create mission upload request: {str(e)}')
-
+                
     ########################################
     # API REQUEST HANDLERS
     ########################################
@@ -267,6 +288,8 @@ class BaseStationStateMachine(Node):
             response.success = self.handle_start_mission_sync(request)
         elif request.command_type == 'pan':
             response.success = self.handle_pan(request)
+        elif request.command_type == 'return_to_base':
+            response.success = self.handle_return_to_base_sync(request)
         else:
             response.success = True
             self.get_logger().info(f'Command {request.command_type} acknowledged (not yet implemented)')
@@ -408,6 +431,79 @@ class BaseStationStateMachine(Node):
 
         self.get_logger().info(f'Pan command sent to drone: {request.yaw_cw}°')
         return True
+
+
+    def handle_return_to_base_sync(self, request):
+        """Handle return to base command - validate and initiate RTL sequence"""
+        
+        # Step 1: Validate base station state (should be Mission_In_Progress)
+        if self.state_machine.current_state.name != 'Mission in progress':
+            self.get_logger().error(f'Cannot return to base - base station not in Mission_In_Progress state. Current state: {self.state_machine.current_state.name}')
+            return False
+
+        # Step 2: Validate drone state  
+        if self.current_drone_state is None:
+            self.get_logger().error('Cannot return to base - no drone state received. Is drone connected?')
+            return False
+        
+        if self.current_drone_state.current_state != 'Mission in progress':
+            self.get_logger().error(f'Cannot return to base - drone not in Mission_In_Progress state. Current drone state: {self.current_drone_state.current_state}')
+            return False
+        
+        # Step 3: Validate RTL waypoints
+        if not request.waypoints or len(request.waypoints) == 0:
+            self.get_logger().error('Cannot return to base - no RTL waypoints provided')
+            return False
+        
+        # Step 4: Send to drone state machine and wait for completion
+        self.get_logger().info('Sending return_to_base command to drone - waiting for completion...')
+
+        # Use threading event to wait for drone response synchronously
+        success_event = threading.Event()
+        rtl_success = [False]
+        error_message = ['']
+
+        def rtl_callback(future):
+            try:
+                response = future.result()
+                if response.success:
+                    self.get_logger().info('Return to base command successfully completed! Drone is returning to base!')
+                    rtl_success[0] = True
+                else:
+                    self.get_logger().error('Return to base command failed at drone')
+                    error_message[0] = f'Drone state machine rejected RTL command. Current drone state: {self.current_drone_state.current_state}'
+            except Exception as e:
+                self.get_logger().error(f'Return to base service call failed: {str(e)}')
+                error_message[0] = str(e)
+            finally:
+                success_event.set()
+
+        try:
+            drone_request = DroneCommand.Request()
+            drone_request.command_type = 'return_to_base'
+            drone_request.waypoints = request.waypoints
+            drone_request.drone_id = self.current_drone_state.drone_id
+            drone_request.base_state = self.state_machine.current_state.name
+
+            future = self.drone_command_client.call_async(drone_request)
+            future.add_done_callback(rtl_callback)
+            
+            # Wait for the async call to complete (with timeout)
+            if success_event.wait(timeout=45.0):  # 45 second timeout (longer than drone's 30s)
+                if rtl_success[0]:
+                    return True
+                else:
+                    self.get_logger().error(f'RTL sequence failed: {error_message[0]}')
+                    return False
+            else:
+                self.get_logger().error('RTL sequence timed out!')
+                if not future.done():
+                    future.cancel()
+                return False
+                
+        except Exception as e:
+            self.get_logger().error(f'Failed to create RTL request: {str(e)}')
+            return False
 
 def main():
     rclpy.init()
