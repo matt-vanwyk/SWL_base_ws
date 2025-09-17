@@ -12,6 +12,8 @@ class ArduinoNode(Node):
     def __init__(self):
         super().__init__('arduino_node')
 
+# TODO: USE ACTUAL SERIAL CONNECTION TO ARDUINO
+
         # # Initialize serial connection
         # self.value = "/dev/ttyUSB0"
         # self.ser = serial.Serial(
@@ -25,9 +27,10 @@ class ArduinoNode(Node):
         # self.ser.reset_input_buffer()
         # self.ser.reset_output_buffer()
 
+        # Global state variable to track bit mask state
         self.current_state = 0
 
-        # Service server for Base State Machine
+        # Service server for base state machine
         self.base_command_server = self.create_service(
             BaseCommand,
             '/base_station/command',
@@ -46,6 +49,8 @@ class ArduinoNode(Node):
         
         #Test for successful moving of the station
         current_state = target_state
+
+        time.sleep(10.0) # Simulate station movement
 
         #Test for station moving failure
         # current_state = 100000000000
@@ -72,6 +77,8 @@ class ArduinoNode(Node):
                 target_state = 0b100  # Doors open, arms uncentered, charger off
             elif request.command == 'secure_station':
                 target_state = 0b000 # Doors closed, arms uncentered, charger off
+            elif request.command == 'prepare_for_landing':
+                target_state = 0b100 # Doors open, arms uncentered, charger off
             
             if target_state is not None:
                 # Send desired state to Arduino (simulated)

@@ -26,9 +26,10 @@ class APIPostNode(Node):
             "longitude": 8.5455938
         }
 
-        # Track state changes
+        # Track state changes and connected clients
         self.last_drone_state = None
         self.coordinates_sent = False
+        self.connected_clients = set()  # Track all connected WebSocket clients
 
         # WebSocket server
         self.websocket_server = None
@@ -41,19 +42,58 @@ class APIPostNode(Node):
         previous_state = self.last_drone_state.current_state if self.last_drone_state else None
         current_state = msg.current_state
 
-        # Detect transition TO Mission_Uploaded (when mission upload succeeds)
+        # Detect transition TO Mission_Uploaded (capture ground position and send coordinates)
         if (previous_state != 'Mission uploaded' and 
             current_state == 'Mission uploaded' and 
             not self.coordinates_sent):
             
-            self.get_logger().info('Drone mission uploaded - sending base coordinates to any connected clients...')
-            # We'll send coordinates to any currently connected clients
-            # This will be handled in the WebSocket message handler
+            # Update base coordinates with actual takeoff position (drone still on ground)
+            self.base_coordinates = {
+                "latitude": msg.latitude,
+                "longitude": msg.longitude
+            }
+            
+            self.get_logger().info(f'Mission uploaded - captured base coordinates: {msg.latitude:.6f}, {msg.longitude:.6f}')
+            self.get_logger().info('Sending base coordinates to all connected clients...')
+            
+            # Use run_coroutine_threadsafe to bridge between ROS thread and asyncio loop
+            if self.asyncio_loop and not self.asyncio_loop.is_closed():
+                asyncio.run_coroutine_threadsafe(
+                    self.broadcast_coordinates_to_all_clients(), 
+                    self.asyncio_loop
+                )
+            else:
+                self.get_logger().error('No asyncio loop available for broadcasting coordinates')
+            
             self.coordinates_sent = True
 
         self.last_drone_state = msg
 
+    async def broadcast_coordinates_to_all_clients(self):
+        """Send coordinates to all currently connected clients"""
+        if not self.connected_clients:
+            self.get_logger().info('No clients connected to receive coordinates')
+            return
+            
+        clients_to_remove = set()
+        
+        for websocket in self.connected_clients.copy():  # Copy to avoid modification during iteration
+            try:
+                await self.send_coordinates_to_client(websocket)
+            except websockets.exceptions.ConnectionClosed:
+                clients_to_remove.add(websocket)
+                self.get_logger().info(f'Removed disconnected client {websocket.remote_address}')
+            except Exception as e:
+                self.get_logger().error(f'Failed to send coordinates to client: {str(e)}')
+                clients_to_remove.add(websocket)
+        
+        # Clean up disconnected clients
+        self.connected_clients -= clients_to_remove
+
+
     async def start(self):
+        self.asyncio_loop = asyncio.get_event_loop()
+
         self.websocket_server = await websockets.serve(
             self.handle_websocket_message,
             "0.0.0.0", 
@@ -66,6 +106,9 @@ class APIPostNode(Node):
         self.get_logger().info(f"New WebSocket connection from {websocket.remote_address}")
         
         try:
+            # Add client to connected set
+            self.connected_clients.add(websocket)
+            
             # If coordinates already available, send immediately
             if self.coordinates_sent:
                 await self.send_coordinates_to_client(websocket)
@@ -77,27 +120,18 @@ class APIPostNode(Node):
                 }
                 await websocket.send(json.dumps(waiting_msg))
             
-            # Keep connection alive and monitor for coordinate sending
-            while True:
-                try:
-                    # Check if coordinates should be sent (non-blocking)
-                    if self.coordinates_sent and not hasattr(websocket, 'coordinates_sent'):
-                        await self.send_coordinates_to_client(websocket)
-                        websocket.coordinates_sent = True  # Mark this socket as having received coordinates
-                    
-                    # Small delay to prevent tight loop
-                    await asyncio.sleep(0.1)
-                    
-                except websockets.exceptions.ConnectionClosed:
-                    break
-                except Exception as e:
-                    self.get_logger().error(f"Error in message loop: {str(e)}")
-                    break
+            # Keep connection alive
+            async for message in websocket:
+                # Handle any incoming messages if needed
+                self.get_logger().info(f"Received message from client: {message}")
                     
         except websockets.exceptions.ConnectionClosed:
             self.get_logger().info(f"WebSocket connection closed for {websocket.remote_address}")
         except Exception as e:
             self.get_logger().error(f"WebSocket error: {str(e)}")
+        finally:
+            # Remove client from connected set
+            self.connected_clients.discard(websocket)
 
     async def send_coordinates_to_client(self, websocket):
         """Send base coordinates to a specific client"""

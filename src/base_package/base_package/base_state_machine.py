@@ -7,6 +7,7 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
 from swl_base_interfaces.srv import BaseCommand, AppRequest
+from swl_base_interfaces.msg import BaseState
 from swl_shared_interfaces.srv import DroneCommand
 from swl_shared_interfaces.msg import DroneState
 from statemachine import StateMachine, State
@@ -19,11 +20,13 @@ class BaseStateMachine(StateMachine):
     Home = State()
     Ready_For_Takeoff = State()
     Mission_In_Progress = State()
+    Prepared_For_Landing = State()
 
     # Define transitions
     station_homed = Idle.to(Home)
     prepare_for_takeoff = Home.to(Ready_For_Takeoff)
     mission_started = Ready_For_Takeoff.to(Mission_In_Progress)
+    prepared_for_landing = Mission_In_Progress.to(Prepared_For_Landing)
 
     # Methods for 'on entering' new states
     def on_enter_Idle(self):
@@ -37,11 +40,15 @@ class BaseStateMachine(StateMachine):
     def on_enter_Ready_For_Takeoff(self):
         """Called when entering Ready_For_Takeoff state - upload mission to drone"""
         self.model.get_logger().info("State change: HOME -> READY_FOR_TAKEOFF")
-        self.model.upload_mission_to_drone()
+        self.model.upload_mission_to_drone() # Station doors are now open, can upload mission to drone and arm and takeoff
 
     def on_enter_Mission_In_Progress(self):
         """Called when entering Mission_In_Progress state - close station doors"""
         self.model.get_logger().info("State change: READY_FOR_TAKEOFF -> MISSION_IN_PROGRESS")
+
+    def on_enter_Prepared_For_Landing(self):
+        """Called when entering Mission_In_Progress state - close station doors"""
+        self.model.get_logger().info("State change: MISSION_IN_PROGRESS -> PREPARED_FOR_LANDING")
 
 class BaseStationStateMachine(Node):
     def __init__(self):
@@ -53,7 +60,7 @@ class BaseStationStateMachine(Node):
         self.client_callback_group = ReentrantCallbackGroup()
         self.subscription_callback_group = MutuallyExclusiveCallbackGroup()
 
-        # Service server for App Request (uses reentrant for potential nested calls)
+        # Service server for AppRequest.srv sent from api receive node
         self.app_request_service = self.create_service(
             AppRequest,
             "/cloud/app_request",
@@ -61,21 +68,21 @@ class BaseStationStateMachine(Node):
             callback_group=self.service_callback_group
         )
 
-        # Service client for Arduino Node (uses reentrant for nested calls)
+        # Service client for arduino node BaseCommand.srv
         self.station_command_client = self.create_client(
             BaseCommand, 
             '/base_station/command',
             callback_group=self.client_callback_group
         )
 
-        # Service client for Drone State Machine (uses reentrant for nested calls)
+        # Service client for drone state machine DroneCommand.srv
         self.drone_command_client = self.create_client(
             DroneCommand,
             'drone/command',
             callback_group=self.client_callback_group
         )
 
-        # Drone state subscriber
+        # Subscriber for drone state machine DroneState.msg
         self.drone_state_subscriber = self.create_subscription(
             DroneState,
             'drone/state',
@@ -88,6 +95,8 @@ class BaseStationStateMachine(Node):
         self.current_drone_state = None
         self.current_mission_id = None
         self.current_waypoints = []
+        self.station_securing_in_progress = False 
+        self.station_landing_prep_in_progress = False
 
         self.get_logger().info('Base Station State Machine node started')
         self.get_logger().info(f'Initial state: {self.state_machine.current_state.name}')
@@ -117,34 +126,44 @@ class BaseStationStateMachine(Node):
             self.get_logger().info('Starting boot sequence - homing station...')
             self.initiate_station_homing()
 
-    ########################################
-    # DRONE STATE CALLBACK
-    ########################################
-    
+# DRONESTATE.MSG CALLBACK FROM DRONE STATE MACHINE
     def drone_state_callback(self, msg):
         """Callback to receive and store current drone state"""
+        # Update current_drone_state from DroneState.msg received from drone state machine
         self.current_drone_state = msg
 
+        # Drive state transitions based on DroneState.msg updates
         self.check_mission_progress_transition()
 
+# METHOD TO DRIVE TRANSITIONS IN BASE STATE MACHINE BASED OFF OF DRONE STATE RECEIVED
     def check_mission_progress_transition(self):
-        """Check if we should transition based on drone state (could be used later when returning to the base station)"""
-        
-        if self.state_machine.current_state.name != 'Ready for takeoff':
-            return
-        
+        """Check if we should transition based on drone state"""
         if self.current_drone_state is None:
+            self.get_logger().warn('No drone state assigned. Is drone connected?')
             return
 
-        # Check the drone state and altitude (drone state changes to Mission in progress when higher than 8m)
-        if (self.current_drone_state.current_state == 'Mission in progress' and self.current_drone_state.altitude >= 8.0):
-            self.get_logger().info('Drone has taken off successfully... Closing station doors')
-            self.secure_station_for_mission()
+        # Handle takeoff transition: only when base is in 'Ready for takeoff'
+        if self.state_machine.current_state.name == 'Ready for takeoff':
+            if (self.current_drone_state.current_state == 'Mission in progress' and 
+                self.current_drone_state.altitude >= 8.0 and 
+                not self.station_securing_in_progress):
+                self.get_logger().info('Drone has taken off successfully... Closing station doors')
+                self.station_securing_in_progress = True
+                self.secure_station_for_mission()
 
-    ########################################
-    # ARDUINO SERVICE CLIENTS
-    ########################################
+        # Handle landing preparation: check for Loiter state when base is in Mission in progress
+        elif (self.state_machine.current_state.name == 'Mission in progress' and
+            self.current_drone_state.current_state == 'Loiter' and
+            not self.station_landing_prep_in_progress):
+            self.get_logger().info('Drone has arrived near base station. Opening station doors')
+            self.station_landing_prep_in_progress = True
+            self.prepare_station_for_landing()
 
+########################################
+# START - BASIC SERVICE CLIENTS TO ARDUINO NODE
+########################################
+
+    # METHOD TO HOME STATION ON SYSTEM BOOT
     def initiate_station_homing(self):
         """Initiate homing process - called from Idle state or boot sequence"""
         def home_callback(future: Future):
@@ -166,36 +185,7 @@ class BaseStationStateMachine(Node):
         future = self.station_command_client.call_async(request)
         future.add_done_callback(home_callback)
 
-    def initiate_station_preparation_for_takeoff(self):
-        """Prepare station for takeoff - called when transitioning to Ready_For_Takeoff"""
-        def station_prepare_callback(future: Future):
-            try:
-                response = future.result()
-                if response.success and response.state == 0b100:
-                    self.get_logger().info('Station prepared for takeoff!')
-                    # Trigger state machine transition (which will automatically call upload_mission_to_drone)
-                    self.state_machine.prepare_for_takeoff()
-                else:
-                    self.get_logger().error(f'Failed to prepare base station hardware. Expected state 100, got: {response.state:03b}')
-                    # TODO: Handle preparation failure - maybe retry or abort mission
-                    
-            except Exception as e:
-                self.get_logger().error(f'Station preparation service call failed: {str(e)}')
-
-        try:
-            # Create Arduino command to prepare for takeoff
-            station_request = BaseCommand.Request()
-            station_request.command = 'prepare_for_takeoff'
-
-            # Make the async service call
-            future = self.station_command_client.call_async(station_request)
-            future.add_done_callback(station_prepare_callback)
-
-            self.get_logger().info('Station preparation request sent to Arduino...')
-            
-        except Exception as e:
-            self.get_logger().error(f'Failed to create station preparation request: {str(e)}')
-
+    # METHOD TO CLOSE STATION DOORS ONCE DRONE IS IN MISSION_IN_PROGRESS STATE
     def secure_station_for_mission(self):
         """Secure the station when mission starts - close doors and leave arms uncentred and charger off (state 000)"""
         def secure_station_callback(future: Future):
@@ -203,13 +193,14 @@ class BaseStationStateMachine(Node):
                 response = future.result()
                 if response.success and response.state == 0b000:
                     self.get_logger().info('Station secured - doors closed')
-                    self.state_machine.mission_started()
+                    self.state_machine.mission_started() # Transition to Mission_In_Progress state once station doors are closed
                 else:
                     self.get_logger().error(f'Failed to secure station. Expected state 000, got: {response.state:03b}')
                     # TODO: Handle securing failure - maybe retry or alert
-
             except Exception as e:
                 self.get_logger().error(f'Station secure service call failed: {str(e)}')
+            finally:
+                self.station_securing_in_progress = False
 
         try:
             station_request = BaseCommand.Request()
@@ -221,65 +212,60 @@ class BaseStationStateMachine(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to create secure station request: {str(e)}')
 
-    ########################################
-    # DRONE SERVICE CLIENTS
-    ########################################
-
-    def upload_mission_to_drone(self):
-        """Upload mission to drone - called automatically when entering Ready_For_Takeoff state"""
+    def prepare_station_for_landing(self):
+        """Prepare the station for drone landing - open doors and leave arms uncentred and charger off (state 100)"""
         
-        # Use threading event to wait for drone response synchronously
         success_event = threading.Event()
-        upload_success = [False]
+        preparation_success = [False]
         error_message = ['']
 
-        def mission_upload_callback(future: Future):
+        def prepare_station_callback(future: Future):
             try:
                 response = future.result()
-                if response.success:
-                    self.get_logger().info(f'Mission {self.current_mission_id} successfully uploaded to drone!')
-                    upload_success[0] = True
+                if response.success and response.state == 0b100:
+                    self.get_logger().info('Station prepared for landing - doors open')
+                    self.state_machine.prepared_for_landing()  # FIXED TYPO: was prepapred_for_landing
+                    preparation_success[0] = True
                 else:
-                    self.get_logger().error(f'Mission upload failed for mission {self.current_mission_id}')
-                    error_message[0] = 'Drone state machine rejected mission upload'
+                    self.get_logger().error(f'Failed to prepare station for drone landing. Expected state 100, got: {response.state:03b}')
+                    error_message[0] = f'Station preparation failed - state: {response.state:03b}'
             except Exception as e:
-                self.get_logger().error(f'Mission upload service call failed: {str(e)}')
+                self.get_logger().error(f'Station prepare for landing service call failed: {str(e)}')
                 error_message[0] = str(e)
             finally:
                 success_event.set()
 
         try:
-            # Create drone command request
-            drone_request = DroneCommand.Request()
-            drone_request.command_type = 'upload_mission'
-            drone_request.waypoints = self.current_waypoints
-            drone_request.drone_id = self.current_drone_state.drone_id if self.current_drone_state else "UNKNOWN_DRONE"
-            drone_request.base_state = self.state_machine.current_state.name
+            station_request = BaseCommand.Request()
+            station_request.command = 'prepare_for_landing'
 
-            future = self.drone_command_client.call_async(drone_request)
-            future.add_done_callback(mission_upload_callback)
+            future = self.station_command_client.call_async(station_request)
+            future.add_done_callback(prepare_station_callback)
 
-            self.get_logger().info(f'Mission upload request sent to drone - waiting for completion...')
+            self.get_logger().info('Station preparation for landing request sent to Arduino - waiting for completion...')
             
             # Wait for the async call to complete (with timeout)
-            if success_event.wait(timeout=45.0):  # 45 second timeout (longer than drone's 30s)
-                if upload_success[0]:
-                    self.get_logger().info('Mission upload sequence completed successfully!')
+            if success_event.wait(timeout=30.0):
+                if preparation_success[0]:
+                    self.get_logger().info('Station landing preparation completed successfully!')
                 else:
-                    self.get_logger().error(f'Mission upload sequence failed: {error_message[0]}')
-                    # TODO: Handle mission upload failure - maybe close station and retry
+                    self.get_logger().error(f'Station landing preparation failed: {error_message[0]}')
             else:
-                self.get_logger().error('Mission upload sequence timed out!')
+                self.get_logger().error('Station landing preparation timed out!')
                 if not future.done():
                     future.cancel()
-
+            
         except Exception as e:
-            self.get_logger().error(f'Failed to create mission upload request: {str(e)}')
-                
-    ########################################
-    # API REQUEST HANDLERS
-    ########################################
+            self.get_logger().error(f'Failed to create station landing preparation request: {str(e)}')
+        finally:
+            # CRITICAL: Reset the flag whether success or failure
+            self.station_landing_prep_in_progress = False
 
+########################################
+# END - BASIC SERVICE CLIENTS TO ARDUINO NODE
+########################################
+
+# HANDLER FOR ALL APP REQUESTS THAT COME FROM API RECIVE NODE
     def handle_app_request(self, request, response):
         """Handle incoming app request service calls"""
         self.get_logger().info(f'Received app request: {request.command_type}')
@@ -296,6 +282,14 @@ class BaseStationStateMachine(Node):
         
         return response
     
+####################################################
+# START - HANDLERS FOR DISTINCT APP REQUESTS (THESE METHODS ALSO ACT AS SERVICE CLIENTS TO DRONE STATE MACHINE
+# AND IN SOME CASES, ARDUINO NODE (cases where we need to verify station state transition before performing drone action))
+####################################################
+    
+    ##################################
+    # Start - Handler sequence for AppRequest (command_type: start_mission)
+    ##################################
     def handle_start_mission_sync(self, request):
         """Validate mission and initiate mission sequence - synchronous to ensure proper response"""
         
@@ -349,7 +343,7 @@ class BaseStationStateMachine(Node):
                 response = future.result()
                 if response.success and response.state == 0b100:
                     self.get_logger().info('Base station hardware prepared for takeoff')
-                    self.state_machine.prepare_for_takeoff()
+                    self.state_machine.prepare_for_takeoff() # GOTO on_enter_Read_For_Takeoff...
                     preparation_success[0] = True
                 else:
                     self.get_logger().error(f'Failed to prepare base station hardware. Expected state 100, got: {response.state:03b}')
@@ -389,11 +383,70 @@ class BaseStationStateMachine(Node):
             self.get_logger().error(f'Failed to create station preparation request: {str(e)}')
             return False
         
+    def upload_mission_to_drone(self):
+        """Upload mission to drone - called automatically when entering Ready_For_Takeoff state"""
+        
+        # Use threading event to wait for drone response synchronously
+        success_event = threading.Event()
+        upload_success = [False]
+        error_message = ['']
+
+        def mission_upload_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success:
+                    self.get_logger().info(f'Mission {self.current_mission_id} successfully uploaded to drone!')
+                    upload_success[0] = True
+                else:
+                    self.get_logger().error(f'Mission upload failed for mission {self.current_mission_id}')
+                    error_message[0] = 'Drone state machine rejected mission upload'
+            except Exception as e:
+                self.get_logger().error(f'Mission upload service call failed: {str(e)}')
+                error_message[0] = str(e)
+            finally:
+                success_event.set()
+
+        try:
+            # Create drone command request
+            drone_request = DroneCommand.Request()
+            drone_request.command_type = 'upload_mission'
+            drone_request.waypoints = self.current_waypoints
+            drone_request.drone_id = self.current_drone_state.drone_id if self.current_drone_state else "UNKNOWN_DRONE"
+            drone_request.base_state = self.state_machine.current_state.name
+
+            future = self.drone_command_client.call_async(drone_request)
+            future.add_done_callback(mission_upload_callback)
+
+            self.get_logger().info(f'Mission upload request sent to drone - waiting for completion...')
+            
+            # Wait for the async call to complete (with timeout)
+            if success_event.wait(timeout=45.0):  # 45 second timeout (longer than drone's 30s)
+                if upload_success[0]:
+                    self.get_logger().info('Mission upload sequence completed successfully!')
+                else:
+                    self.get_logger().error(f'Mission upload sequence failed: {error_message[0]}')
+                    # TODO: Handle mission upload failure - maybe close station and retry
+            else:
+                self.get_logger().error('Mission upload sequence timed out!')
+                if not future.done():
+                    future.cancel()
+
+        except Exception as e:
+            self.get_logger().error(f'Failed to create mission upload request: {str(e)}')
+
+    ##################################
+    # End - Handler sequence for AppRequest (command_type: start_mission)
+    ##################################
+
+    ##################################
+    # Start - Handler sequence for AppRequest (command_type: pan)
+    ##################################
+        
     def handle_pan(self, request):
         """Validate drone state before panning and sending command to drone"""
         # Step 1: Validate drone state
         if self.current_drone_state is None:
-            self.get_logger().error('No drone state - drone not connected?')
+            self.get_logger().warn('No current drone state. Is drone connected?')
             return False
         
         #Step 2: Check drone state is Mission_In_Progress
@@ -432,6 +485,13 @@ class BaseStationStateMachine(Node):
         self.get_logger().info(f'Pan command sent to drone: {request.yaw_cw}°')
         return True
 
+    ##################################
+    # End - Handler sequence for AppRequest (command_type: pan)
+    ##################################
+
+    ##################################
+    # Start - Handler sequence for AppRequest (command_type: )
+    ##################################
 
     def handle_return_to_base_sync(self, request):
         """Handle return to base command - validate and initiate RTL sequence"""
@@ -504,6 +564,15 @@ class BaseStationStateMachine(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to create RTL request: {str(e)}')
             return False
+
+    ##################################
+    # End - Handler sequence for AppRequest (command_type: )
+    ##################################
+
+####################################################
+# END - HANDLERS FOR DISTINCT APP REQUESTS (THESE METHODS ALSO ACT AS SERVICE CLIENTS TO DRONE STATE MACHINE
+# AND IN SOME CASES, ARDUINO NODE (cases where we need to verify station state transition before performing drone action))
+####################################################
 
 def main():
     rclpy.init()
