@@ -12,7 +12,6 @@ find_package(swl_shared_interfaces REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/AppRequest.srv"
   "srv/BaseCommand.srv"
-  "msg/BaseState.msg"
   DEPENDENCIES std_msgs
   DEPENDENCIES swl_shared_interfaces
 )

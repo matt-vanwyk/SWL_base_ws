@@ -12,6 +12,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Waypoint.msg"
   "srv/DroneCommand.srv"
   "msg/DroneState.msg"
+  "msg/BaseState.msg"
   DEPENDENCIES std_msgs
 )
 ament_export_dependencies(rosidl_default_runtime)

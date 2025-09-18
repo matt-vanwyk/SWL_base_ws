@@ -6,10 +6,10 @@ import threading
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
+from std_msgs.msg import Header
 from swl_base_interfaces.srv import BaseCommand, AppRequest
-from swl_base_interfaces.msg import BaseState
 from swl_shared_interfaces.srv import DroneCommand
-from swl_shared_interfaces.msg import DroneState
+from swl_shared_interfaces.msg import DroneState, BaseState
 from statemachine import StateMachine, State
 from rclpy.task import Future
 
@@ -59,6 +59,7 @@ class BaseStationStateMachine(Node):
         self.service_callback_group = ReentrantCallbackGroup()
         self.client_callback_group = ReentrantCallbackGroup()
         self.subscription_callback_group = MutuallyExclusiveCallbackGroup()
+        self.timer_callback_group = MutuallyExclusiveCallbackGroup()
 
         # Service server for AppRequest.srv sent from api receive node
         self.app_request_service = self.create_service(
@@ -89,6 +90,20 @@ class BaseStationStateMachine(Node):
             self.drone_state_callback,
             10,
             callback_group=self.subscription_callback_group
+        )
+
+        # Publisher for BaseState.msg (to drone state machine)
+        self.base_state_publisher = self.create_publisher(
+            BaseState,
+            'base/state',
+            10
+        )
+
+        # Timer for publishing BaseState.msg
+        self.state_publish_timer = self.create_timer(
+            1.0, 
+            self.publish_base_state,
+            callback_group=self.timer_callback_group
         )
 
         # Mission variables
@@ -159,6 +174,16 @@ class BaseStationStateMachine(Node):
             self.station_landing_prep_in_progress = True
             self.prepare_station_for_landing()
 
+# METHOD TO PUBLISH BASE STATE TO DRONE STATE MACHINE
+    def publish_base_state(self):
+        msg = BaseState()
+        msg.header = Header()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "base"
+
+        msg.current_state = self.state_machine.current_state.name
+        self.base_state_publisher.publish(msg)
+
 ########################################
 # START - BASIC SERVICE CLIENTS TO ARDUINO NODE
 ########################################
@@ -212,6 +237,7 @@ class BaseStationStateMachine(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to create secure station request: {str(e)}')
 
+    # METHOD TO OPEN STATION DOORS ONCE DRONE IS IN LOITER STATE
     def prepare_station_for_landing(self):
         """Prepare the station for drone landing - open doors and leave arms uncentred and charger off (state 100)"""
         
@@ -490,7 +516,7 @@ class BaseStationStateMachine(Node):
     ##################################
 
     ##################################
-    # Start - Handler sequence for AppRequest (command_type: )
+    # Start - Handler sequence for AppRequest (command_type: return_to_base)
     ##################################
 
     def handle_return_to_base_sync(self, request):
@@ -566,7 +592,7 @@ class BaseStationStateMachine(Node):
             return False
 
     ##################################
-    # End - Handler sequence for AppRequest (command_type: )
+    # End - Handler sequence for AppRequest (command_type: return_to_base)
     ##################################
 
 ####################################################
