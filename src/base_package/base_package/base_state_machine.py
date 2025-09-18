@@ -21,12 +21,14 @@ class BaseStateMachine(StateMachine):
     Ready_For_Takeoff = State()
     Mission_In_Progress = State()
     Prepared_For_Landing = State()
+    Charging = State()
 
     # Define transitions
     station_homed = Idle.to(Home)
     prepare_for_takeoff = Home.to(Ready_For_Takeoff)
     mission_started = Ready_For_Takeoff.to(Mission_In_Progress)
     prepared_for_landing = Mission_In_Progress.to(Prepared_For_Landing)
+    station_charging = Prepared_For_Landing.to(Charging)
 
     # Methods for 'on entering' new states
     def on_enter_Idle(self):
@@ -47,8 +49,12 @@ class BaseStateMachine(StateMachine):
         self.model.get_logger().info("State change: READY_FOR_TAKEOFF -> MISSION_IN_PROGRESS")
 
     def on_enter_Prepared_For_Landing(self):
-        """Called when entering Mission_In_Progress state - close station doors"""
+        """Called when entering Prepared_For_Landing state - open station doors"""
         self.model.get_logger().info("State change: MISSION_IN_PROGRESS -> PREPARED_FOR_LANDING")
+
+    def on_enter_Charging(self):
+        """Called when entering Charging state - close station doors, centre and charge"""
+        self.model.get_logger().info("State change: PREPARED_FOR_LANDING -> CHARGING")
 
 class BaseStationStateMachine(Node):
     def __init__(self):
@@ -112,6 +118,7 @@ class BaseStationStateMachine(Node):
         self.current_waypoints = []
         self.station_securing_in_progress = False 
         self.station_landing_prep_in_progress = False
+        self.station_landed_prep_in_progress = False
 
         self.get_logger().info('Base Station State Machine node started')
         self.get_logger().info(f'Initial state: {self.state_machine.current_state.name}')
@@ -173,6 +180,15 @@ class BaseStationStateMachine(Node):
             self.get_logger().info('Drone has arrived near base station. Opening station doors')
             self.station_landing_prep_in_progress = True
             self.prepare_station_for_landing()
+
+        # Handle landed preparation: check for Landed state when base is in Prepared for landing
+        elif (self.state_machine.current_state.name == 'Prepared for landing' and
+            self.current_drone_state.current_state == 'Landed' and
+            self.current_drone_state.landed_state == "ON_GROUND" and 
+            not self.station_landed_prep_in_progress):
+            self.get_logger().info('Drone has landed on platform. Closing doors, centering arms and turning charger on')
+            self.station_landed_prep_in_progress = True
+            self.prepare_station_for_charging()
 
 # METHOD TO PUBLISH BASE STATE TO DRONE STATE MACHINE
     def publish_base_state(self):
@@ -240,7 +256,7 @@ class BaseStationStateMachine(Node):
     # METHOD TO OPEN STATION DOORS ONCE DRONE IS IN LOITER STATE
     def prepare_station_for_landing(self):
         """Prepare the station for drone landing - open doors and leave arms uncentred and charger off (state 100)"""
-        
+
         success_event = threading.Event()
         preparation_success = [False]
         error_message = ['']
@@ -286,6 +302,55 @@ class BaseStationStateMachine(Node):
         finally:
             # CRITICAL: Reset the flag whether success or failure
             self.station_landing_prep_in_progress = False
+
+    def prepare_station_for_charging(self):
+        """Prepare the station for drone landing - open doors and leave arms uncentred and charger off (state 100)"""
+
+        success_event = threading.Event()
+        preparation_success = [False]
+        error_message = ['']
+
+        def prepare_station_for_charging_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success and response.state == 0b011:
+                    self.get_logger().info('Station is charging with doors closed and arms centred')
+                    self.state_machine.station_charging()  
+                    preparation_success[0] = True
+                else:
+                    self.get_logger().error(f'Failed to start charging sequence. Expected state 011, got: {response.state:03b}')
+                    error_message[0] = f'Station preparation failed - state: {response.state:03b}'
+            except Exception as e:
+                self.get_logger().error(f'Station start charging service call failed: {str(e)}')
+                error_message[0] = str(e)
+            finally:
+                success_event.set()
+
+        try:
+            station_request = BaseCommand.Request()
+            station_request.command = 'start_charging'
+
+            future = self.station_command_client.call_async(station_request)
+            future.add_done_callback(prepare_station_for_charging_callback)
+
+            self.get_logger().info('Station start charging request sent to Arduino - waiting for completion...')
+            
+            # Wait for the async call to complete (with timeout)
+            if success_event.wait(timeout=30.0):
+                if preparation_success[0]:
+                    self.get_logger().info('Station started charging successfully!')
+                else:
+                    self.get_logger().error(f'Station failed to start charging: {error_message[0]}')
+            else:
+                self.get_logger().error('Station start charging timed out!')
+                if not future.done():
+                    future.cancel()
+            
+        except Exception as e:
+            self.get_logger().error(f'Failed to create station start charging request: {str(e)}')
+        finally:
+            # CRITICAL: Reset the flag whether success or failure
+            self.station_landed_prep_in_progress = False
 
 ########################################
 # END - BASIC SERVICE CLIENTS TO ARDUINO NODE

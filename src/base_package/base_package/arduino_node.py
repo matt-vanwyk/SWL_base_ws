@@ -79,6 +79,8 @@ class ArduinoNode(Node):
                 target_state = 0b000 # Doors closed, arms uncentered, charger off
             elif request.command == 'prepare_for_landing':
                 target_state = 0b100 # Doors open, arms uncentered, charger off
+            elif request.command == 'start_charging':
+                target_state = 0b011 # Doors closed, arms centred, charger on
             
             if target_state is not None:
                 # Send desired state to Arduino (simulated)
