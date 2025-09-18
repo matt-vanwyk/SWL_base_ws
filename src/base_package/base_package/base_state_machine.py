@@ -190,6 +190,14 @@ class BaseStationStateMachine(Node):
             self.station_landed_prep_in_progress = True
             self.prepare_station_for_charging()
 
+        # Handle charging completion: check for Ready_To_Fly state when base is Charging
+        elif (self.state_machine.current_state.name == 'Charging' and
+            self.current_drone_state.current_state == 'Ready to fly' and
+            not self.station_charging_complete_in_progress):
+            self.get_logger().info('Drone charging complete - preparing station for next mission')
+            self.station_charging_complete_in_progress = True
+            self.prepare_station_for_next_mission()
+
 # METHOD TO PUBLISH BASE STATE TO DRONE STATE MACHINE
     def publish_base_state(self):
         msg = BaseState()
