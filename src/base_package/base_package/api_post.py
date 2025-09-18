@@ -30,6 +30,7 @@ class APIPostNode(Node):
         self.last_drone_state = None
         self.coordinates_sent = False
         self.connected_clients = set()  # Track all connected WebSocket clients
+        self.asyncio_loop = None
 
         # WebSocket server
         self.websocket_server = None
@@ -38,7 +39,7 @@ class APIPostNode(Node):
         self.get_logger().info(f'Base coordinates: {self.base_coordinates["latitude"]:.6f}, {self.base_coordinates["longitude"]:.6f}')
                 
     def drone_state_callback(self, msg):
-        """Monitor drone state changes"""
+        """Monitor drone state changes and stream telemetry"""
         previous_state = self.last_drone_state.current_state if self.last_drone_state else None
         current_state = msg.current_state
 
@@ -67,7 +68,58 @@ class APIPostNode(Node):
             
             self.coordinates_sent = True
 
+        # Stream telemetry data to all connected clients
+        if self.asyncio_loop and not self.asyncio_loop.is_closed():
+            asyncio.run_coroutine_threadsafe(
+                self.broadcast_telemetry_to_all_clients(msg), 
+                self.asyncio_loop
+            )
+
         self.last_drone_state = msg
+
+    async def broadcast_telemetry_to_all_clients(self, drone_state_msg):
+        """Stream telemetry data to all connected clients"""
+        if not self.connected_clients:
+            return
+            
+        # Convert ROS message to dictionary
+        telemetry_data = {
+            "status": "telemetry",
+            "telemetry": {
+                "latitude": drone_state_msg.latitude,
+                "longitude": drone_state_msg.longitude,
+                "altitude": drone_state_msg.altitude,
+                "armed": drone_state_msg.armed,
+                "flight_mode": drone_state_msg.flight_mode,
+                "is_in_air": drone_state_msg.is_in_air,
+                "battery_percentage": drone_state_msg.battery_percentage,
+                "num_satellites": drone_state_msg.num_satellites,
+                "landed_state": drone_state_msg.landed_state,
+                "velocity_x": drone_state_msg.velocity_x,
+                "velocity_y": drone_state_msg.velocity_y,
+                "velocity_z": drone_state_msg.velocity_z,
+                "drone_id": drone_state_msg.drone_id,
+                "current_yaw": drone_state_msg.current_yaw,
+                "mission_complete": drone_state_msg.mission_complete,
+                "current_state": drone_state_msg.current_state
+            },
+            "timestamp": self.get_clock().now().to_msg().sec
+        }
+        
+        clients_to_remove = set()
+        
+        for websocket in self.connected_clients.copy():
+            try:
+                await websocket.send(json.dumps(telemetry_data))
+            except websockets.exceptions.ConnectionClosed:
+                clients_to_remove.add(websocket)
+                self.get_logger().debug(f'Removed disconnected client {websocket.remote_address}')
+            except Exception as e:
+                self.get_logger().error(f'Failed to send telemetry to client: {str(e)}')
+                clients_to_remove.add(websocket)
+        
+        # Clean up disconnected clients
+        self.connected_clients -= clients_to_remove
 
     async def broadcast_coordinates_to_all_clients(self):
         """Send coordinates to all currently connected clients"""
@@ -90,7 +142,6 @@ class APIPostNode(Node):
         # Clean up disconnected clients
         self.connected_clients -= clients_to_remove
 
-
     async def start(self):
         self.asyncio_loop = asyncio.get_event_loop()
 
@@ -109,7 +160,7 @@ class APIPostNode(Node):
             # Add client to connected set
             self.connected_clients.add(websocket)
             
-            # If coordinates already available, send immediately
+            # Send initial status
             if self.coordinates_sent:
                 await self.send_coordinates_to_client(websocket)
             else:
@@ -120,10 +171,36 @@ class APIPostNode(Node):
                 }
                 await websocket.send(json.dumps(waiting_msg))
             
+            # Send current telemetry if available
+            if self.last_drone_state:
+                telemetry_data = {
+                    "status": "telemetry",
+                    "telemetry": {
+                        "latitude": self.last_drone_state.latitude,
+                        "longitude": self.last_drone_state.longitude,
+                        "altitude": self.last_drone_state.altitude,
+                        "armed": self.last_drone_state.armed,
+                        "flight_mode": self.last_drone_state.flight_mode,
+                        "is_in_air": self.last_drone_state.is_in_air,
+                        "battery_percentage": self.last_drone_state.battery_percentage,
+                        "num_satellites": self.last_drone_state.num_satellites,
+                        "landed_state": self.last_drone_state.landed_state,
+                        "velocity_x": self.last_drone_state.velocity_x,
+                        "velocity_y": self.last_drone_state.velocity_y,
+                        "velocity_z": self.last_drone_state.velocity_z,
+                        "drone_id": self.last_drone_state.drone_id,
+                        "current_yaw": self.last_drone_state.current_yaw,
+                        "mission_complete": self.last_drone_state.mission_complete,
+                        "current_state": self.last_drone_state.current_state
+                    },
+                    "timestamp": self.get_clock().now().to_msg().sec
+                }
+                await websocket.send(json.dumps(telemetry_data))
+            
             # Keep connection alive
             async for message in websocket:
                 # Handle any incoming messages if needed
-                self.get_logger().info(f"Received message from client: {message}")
+                self.get_logger().debug(f"Received message from client: {message}")
                     
         except websockets.exceptions.ConnectionClosed:
             self.get_logger().info(f"WebSocket connection closed for {websocket.remote_address}")
