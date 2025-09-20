@@ -94,10 +94,10 @@ class APIReceiveNode(Node):
                         waypoint = Waypoint()
                         waypoint.latitude = wp_data.get('latitude', 0.0)
                         waypoint.longitude = wp_data.get('longitude', 0.0)
-                        waypoint.altitude = wp_data.get('altitude', 0.0)
+                        waypoint.altitude = float(wp_data.get('altitude', 0.0))
                         request.waypoints.append(waypoint)
 
-                    request.yaw_cw = data.get('yaw_cw', 0.0)
+                    request.yaw_cw = float(data.get('yaw_cw', 0.0)) 
                     
                     # Make the service call
                     self.get_logger().info(f"Making service call with command: {request.command_type}")

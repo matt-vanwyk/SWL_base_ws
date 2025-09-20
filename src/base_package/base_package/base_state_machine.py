@@ -29,6 +29,7 @@ class BaseStateMachine(StateMachine):
     mission_started = Ready_For_Takeoff.to(Mission_In_Progress)
     prepared_for_landing = Mission_In_Progress.to(Prepared_For_Landing)
     station_charging = Prepared_For_Landing.to(Charging)
+    prepare_station_for_next_mission = Charging.to(Home)
 
     # Methods for 'on entering' new states
     def on_enter_Idle(self):
@@ -42,7 +43,7 @@ class BaseStateMachine(StateMachine):
     def on_enter_Ready_For_Takeoff(self):
         """Called when entering Ready_For_Takeoff state - upload mission to drone"""
         self.model.get_logger().info("State change: HOME -> READY_FOR_TAKEOFF")
-        self.model.upload_mission_to_drone() # Station doors are now open, can upload mission to drone and arm and takeoff
+        self.model.upload_mission_to_drone() 
 
     def on_enter_Mission_In_Progress(self):
         """Called when entering Mission_In_Progress state - close station doors"""
@@ -119,6 +120,7 @@ class BaseStationStateMachine(Node):
         self.station_securing_in_progress = False 
         self.station_landing_prep_in_progress = False
         self.station_landed_prep_in_progress = False
+        self.station_charging_complete_in_progress = False
 
         self.get_logger().info('Base Station State Machine node started')
         self.get_logger().info(f'Initial state: {self.state_machine.current_state.name}')
@@ -196,7 +198,7 @@ class BaseStationStateMachine(Node):
             not self.station_charging_complete_in_progress):
             self.get_logger().info('Drone charging complete - preparing station for next mission')
             self.station_charging_complete_in_progress = True
-            self.prepare_station_for_next_mission()
+            self.state_machine.prepare_station_for_next_mission()
 
 # METHOD TO PUBLISH BASE STATE TO DRONE STATE MACHINE
     def publish_base_state(self):
@@ -622,7 +624,10 @@ class BaseStationStateMachine(Node):
         rtl_success = [False]
         error_message = ['']
 
-        def rtl_callback(future):
+        self.current_mission_id = request.mission_id
+        self.current_waypoints = request.waypoints
+
+        def rtl_callback(future: Future):
             try:
                 response = future.result()
                 if response.success:
@@ -640,8 +645,8 @@ class BaseStationStateMachine(Node):
         try:
             drone_request = DroneCommand.Request()
             drone_request.command_type = 'return_to_base'
-            drone_request.waypoints = request.waypoints
-            drone_request.drone_id = self.current_drone_state.drone_id
+            drone_request.waypoints = self.current_waypoints
+            drone_request.drone_id = self.current_drone_state.drone_id if self.current_drone_state else "UNKNOWN_DRONE"
             drone_request.base_state = self.state_machine.current_state.name
 
             future = self.drone_command_client.call_async(drone_request)
