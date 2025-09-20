@@ -377,6 +377,8 @@ class BaseStationStateMachine(Node):
             response.success = self.handle_pan(request)
         elif request.command_type == 'return_to_base':
             response.success = self.handle_return_to_base_sync(request)
+        elif request.command_type == 'abort_mission':
+            response.success = self.handle_abort_mission_sync(request)
         else:
             response.success = True
             self.get_logger().info(f'Command {request.command_type} acknowledged (not yet implemented)')
@@ -671,6 +673,85 @@ class BaseStationStateMachine(Node):
 
     ##################################
     # End - Handler sequence for AppRequest (command_type: return_to_base)
+    ##################################
+
+    ##################################
+    # Start - Handler sequence for AppRequest (command_type: abort_mission)
+    ##################################
+
+    def handle_abort_mission_sync(self, request):
+        """Handle abort mission command - can be executed at any time during mission"""
+
+        # Step 1: Validate that we have drone state
+        if self.current_drone_state is None:
+            self.get_logger().error('Cannot abort mission - no drone state received. Is drone connected?')
+            return False
+
+        # Step 2: Validate that drone is in a state where abort makes sense
+        valid_abort_states = ['Mission in progress', 'Loiter', 'Pan']
+        if self.current_drone_state.current_state not in valid_abort_states:
+            self.get_logger().error(f'Cannot abort mission - drone in {self.current_drone_state.current_state} state')
+            return False
+        
+        # Step 3: Validate that waypoints (base coordinates) are provided
+        if not request.waypoints or len(request.waypoints) == 0:
+            self.get_logger().error('Cannot abort mission - no base coordinates provided')
+            return False
+        
+        self.get_logger().info('Sending abort_mission command to drone - waiting for completion...')
+
+        # Use threading event to wait for drone response synchronously
+        success_event = threading.Event()
+        abort_success = [False]
+        error_message = ['']
+
+        self.current_mission_id = request.mission_id
+        self.current_waypoints = request.waypoints
+
+        def abort_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success:
+                    self.get_logger().info('Abort mission command successfully completed! Drone is returning to base!')
+                    abort_success[0] = True
+                else:
+                    self.get_logger().error('Abort mission command failed at drone')
+                    error_message[0] = f'Drone state machine rejected abort command. Current drone state: {self.current_drone_state.current_state}'
+            except Exception as e:
+                self.get_logger().error(f'Abort mission service call failed: {str(e)}')
+                error_message[0] = str(e)
+            finally:
+                success_event.set()
+        
+        try:
+            drone_request = DroneCommand.Request()
+            drone_request.command_type = 'abort_mission'
+            drone_request.waypoints = self.current_waypoints
+            drone_request.drone_id = self.current_drone_state.drone_id if self.current_drone_state else "UNKNOWN_DRONE"
+            drone_request.base_state = self.state_machine.current_state.name
+
+            future = self.drone_command_client.call_async(drone_request)
+            future.add_done_callback(abort_callback)
+
+            # Wait for the async call to complete (with timeout)
+            if success_event.wait(timeout=45.0):  # 45 second timeout (longer than drone's 30s)
+                if abort_success[0]:
+                    return True
+                else:
+                    self.get_logger().error(f'Abort mission sequence failed: {error_message[0]}')
+                    return False
+            else:
+                self.get_logger().error('Abort mission sequence timed out!')
+                if not future.done():
+                    future.cancel()
+                return False
+        
+        except Exception as e:
+            self.get_logger().error(f'Failed to create abort mission request: {str(e)}')
+            return False
+
+    ##################################
+    # End - Handler sequence for AppRequest (command_type: abort_mission)
     ##################################
 
 ####################################################
