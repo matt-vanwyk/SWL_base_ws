@@ -23,7 +23,7 @@ class APIReceiveNode(Node):
         # Validate the command type
         self.valid_commands = [
             'abort_mission', 'start_mission', 'pan',
-            'manual_mode', 'reroute', 'return_to_base',
+            'manual_mode', 'reroute', 'return_to_base', 'reroute_mission',
             'manual_open_hatch', 'manual_close_hatch', 'manual_centre', 'manual_uncentre', 'manual_enable_charge', 'manual_disable_charge'
         ]
 

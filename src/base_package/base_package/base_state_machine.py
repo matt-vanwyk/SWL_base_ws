@@ -379,6 +379,8 @@ class BaseStationStateMachine(Node):
             response.success = self.handle_return_to_base_sync(request)
         elif request.command_type == 'abort_mission':
             response.success = self.handle_abort_mission_sync(request)
+        elif request.command_type == 'reroute_mission':
+            response.success = self.handle_reroute_mission_sync(request)
         else:
             response.success = True
             self.get_logger().info(f'Command {request.command_type} acknowledged (not yet implemented)')
@@ -590,6 +592,88 @@ class BaseStationStateMachine(Node):
 
     ##################################
     # End - Handler sequence for AppRequest (command_type: pan)
+    ##################################
+
+    ##################################
+    # Start - Handler sequence for AppRequest (command_type: reroute_mission)
+    ##################################
+
+    def handle_reroute_mission_sync(self, request):
+        """Handle reroute mission command - replace current mission with new waypoints"""
+
+        # Step 1: Validate base station state
+        if self.state_machine.current_state.name != 'Mission in progress':
+            self.get_logger().error(f'Cannot reroute mission - base station not in Mission_In_Progress state. Current state: {self.state_machine.current_state.name}')
+            return False
+
+        # Step 2: Validate drone state  
+        if self.current_drone_state is None:
+            self.get_logger().error('Cannot reroute mission - no drone state received. Is drone connected?')
+            return False
+        
+        if self.current_drone_state.current_state != 'Mission in progress':
+            self.get_logger().error(f'Cannot reroute mission - drone not in Mission_In_Progress state. Current drone state: {self.current_drone_state.current_state}')
+            return False
+        
+        # Step 3: Validate new waypoints
+        if not request.waypoints or len(request.waypoints) == 0:
+            self.get_logger().error('Cannot reroute mission - no new waypoints provided')
+            return False
+        
+        # Step 4: Send to drone state machine and wait for completion
+        self.get_logger().info('Sending reroute_mission command to drone - waiting for completion...')
+
+        success_event = threading.Event()
+        reroute_success = [False]
+        error_message = ['']
+
+        self.current_mission_id = request.mission_id
+        self.current_waypoints = request.waypoints
+
+        def reroute_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success:
+                    self.get_logger().info('Reroute mission command successfully completed! Drone following new route!')
+                    reroute_success[0] = True
+                else:
+                    self.get_logger().error('Reroute mission command failed at drone')
+                    error_message[0] = f'Drone state machine rejected reroute command. Current drone state: {self.current_drone_state.current_state}'
+            except Exception as e:
+                self.get_logger().error(f'Reroute mission service call failed: {str(e)}')
+                error_message[0] = str(e)
+            finally:
+                success_event.set()
+
+        try:
+            drone_request = DroneCommand.Request()
+            drone_request.command_type = 'reroute_mission'
+            drone_request.waypoints = self.current_waypoints
+            drone_request.drone_id = self.current_drone_state.drone_id if self.current_drone_state else "UNKNOWN_DRONE"
+            drone_request.base_state = self.state_machine.current_state.name
+
+            future = self.drone_command_client.call_async(drone_request)
+            future.add_done_callback(reroute_callback)
+
+            # Wait for the async call to complete (with timeout)
+            if success_event.wait(timeout=45.0):  # 45 second timeout (longer than drone's 30s)
+                if reroute_success[0]:
+                    return True
+                else:
+                    self.get_logger().error(f'Reroute mission sequence failed: {error_message[0]}')
+                    return False
+            else:
+                self.get_logger().error('Reroute mission sequence timed out!')
+                if not future.done():
+                    future.cancel()
+                return False
+                
+        except Exception as e:
+            self.get_logger().error(f'Failed to create reroute mission request: {str(e)}')
+            return False
+
+    ##################################
+    # End - Handler sequence for AppRequest (command_type: reroute_mission)
     ##################################
 
     ##################################
