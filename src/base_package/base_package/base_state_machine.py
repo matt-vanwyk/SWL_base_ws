@@ -3,6 +3,7 @@
 import rclpy
 import time
 import threading
+from enum import Enum
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
@@ -12,6 +13,11 @@ from swl_shared_interfaces.srv import DroneCommand
 from swl_shared_interfaces.msg import DroneState, BaseState
 from statemachine import StateMachine, State
 from rclpy.task import Future
+
+class SystemMode(Enum):
+    MANUAL = "manual"
+    AUTONOMOUS = "autonomous"
+    MAINTENANCE = "maintenance"
 
 class BaseStateMachine(StateMachine):
     
@@ -61,6 +67,10 @@ class BaseStationStateMachine(Node):
     def __init__(self):
         super().__init__('base_state_machine')
         self.state_machine = BaseStateMachine(model=self)
+
+        # System mode management variable:
+        self.system_mode = SystemMode.MANUAL # initialise to manual mode
+        self.get_logger().info(f'System initialized in {self.system_mode.value} mode')
 
         # Create callback groups for different operations
         self.service_callback_group = ReentrantCallbackGroup()
@@ -149,6 +159,28 @@ class BaseStationStateMachine(Node):
         if self.state_machine.current_state.name == 'Idle':
             self.get_logger().info('Starting boot sequence - homing station...')
             self.initiate_station_homing()
+
+# MODE VALIDATION HELPER METHOD
+    def can_switch_to_mode(self, target_mode: SystemMode) -> bool:
+        """Check if mode switch is safe given current system state"""
+
+        current_base_state = self.state_machine.current_state.name
+        current_drone_state = self.current_drone_state.current_state if self.current_drone_state else None
+
+        # Define safe state combinations for mode switching
+        safe_states = [
+            ("Home", "Ready to fly"),
+            ("Charging", "Charging")
+        ]
+
+        current_state_combo = (current_base_state, current_drone_state)
+
+        if current_state_combo in safe_states:
+            self.get_logger().info(f'System in safe state for mode switch: Base({current_base_state}) + Drone({current_drone_state})')
+            return True
+        else:
+            self.get_logger().warning(f'System not in safe state for mode switch: Base({current_base_state}) + Drone({current_drone_state})')
+            return False
 
 # DRONESTATE.MSG CALLBACK FROM DRONE STATE MACHINE
     def drone_state_callback(self, msg):
@@ -362,6 +394,55 @@ class BaseStationStateMachine(Node):
             # CRITICAL: Reset the flag whether success or failure
             self.station_landed_prep_in_progress = False
 
+    def switch_mode_with_homing(self, target_mode: SystemMode):
+        """Switch modes by homing station first - ensures clean state transition"""
+        
+        success_event = threading.Event()
+        homing_success = [False]
+        error_message = ['']
+
+        def mode_switch_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success and response.state == 0b011:
+                    self.get_logger().info(f'Station homed successfully - switching to {target_mode.value} mode')
+                    self.system_mode = target_mode
+                    homing_success[0] = True
+                else:
+                    self.get_logger().error(f'Station homing failed during mode switch: {response.state:03b}')
+                    error_message[0] = f'Expected state 011, got: {response.state:03b}'
+            except Exception as e:
+                self.get_logger().error(f'Mode switch homing failed: {str(e)}')
+                error_message[0] = str(e)
+            finally:
+                success_event.set()
+
+        try:
+            # Send home command to Arduino
+            home_request = BaseCommand.Request()
+            home_request.command = 'home_station'
+            
+            future = self.station_command_client.call_async(home_request)
+            future.add_done_callback(mode_switch_callback)
+            
+            # Wait for completion
+            if success_event.wait(timeout=30.0):
+                if homing_success[0]:
+                    self.get_logger().info(f'Successfully switched to {target_mode.value} mode with station homing')
+                    return True
+                else:
+                    self.get_logger().error(f'Mode switch failed: {error_message[0]}')
+                    return False
+            else:
+                self.get_logger().error('Mode switch homing timed out!')
+                if not future.done():
+                    future.cancel()
+                return False
+                
+        except Exception as e:
+            self.get_logger().error(f'Failed to initiate mode switch homing: {str(e)}')
+            return False
+
 ########################################
 # END - BASIC SERVICE CLIENTS TO ARDUINO NODE
 ########################################
@@ -369,7 +450,7 @@ class BaseStationStateMachine(Node):
 # HANDLER FOR ALL APP REQUESTS THAT COME FROM API RECIVE NODE
     def handle_app_request(self, request, response):
         """Handle incoming app request service calls"""
-        self.get_logger().info(f'Received app request: {request.command_type}')
+        self.get_logger().info(f'Received app request: {request.command_type} (Mode: {request.target_mode})')
         
         if request.command_type == 'start_mission':
             response.success = self.handle_start_mission_sync(request)
@@ -381,6 +462,10 @@ class BaseStationStateMachine(Node):
             response.success = self.handle_abort_mission_sync(request)
         elif request.command_type == 'reroute_mission':
             response.success = self.handle_reroute_mission_sync(request)
+        elif request.command_type == 'set_system_mode':
+            response.success = self.handle_set_system_mode(request)
+        elif request.command_type in ['manual_open_hatch', 'manual_close_hatch', 'manual_centre', 'manual_uncentre', 'manual_enable_charge', 'manual_disable_charge']:
+            response.success = self.handle_maintenance_command_sync(request)
         else:
             response.success = True
             self.get_logger().info(f'Command {request.command_type} acknowledged (not yet implemented)')
@@ -836,6 +921,125 @@ class BaseStationStateMachine(Node):
 
     ##################################
     # End - Handler sequence for AppRequest (command_type: abort_mission)
+    ##################################
+
+    ##################################
+    # Start - Handler sequence for AppRequest (command_type: set_system_mode)
+    ##################################
+
+    def handle_set_system_mode(self, request):
+        """Handle system mode switching command"""
+        try:
+            target_mode = SystemMode(request.target_mode)
+        except ValueError:
+            self.get_logger().error(f'Invalid target mode: {request.target_mode}')
+            return False
+        
+        self.get_logger().info(f'Mode switch request: {self.system_mode.value} -> {target_mode.value}')
+
+        if self.system_mode == target_mode:
+            self.get_logger().info(f'Already in {target_mode.value} mode - no change needed')
+            return True
+
+        if not self.can_switch_to_mode(target_mode):
+            return False
+        
+        # If switching FROM maintenance mode, home the station first
+        if self.system_mode == SystemMode.MAINTENANCE and target_mode != SystemMode.MAINTENANCE:
+            self.get_logger().info(f'Switching from maintenance to {target_mode.value} mode - homing station first...')
+            return self.switch_mode_with_homing(target_mode)
+        else:
+            # Simple mode switch without homing
+            old_mode = self.system_mode.value
+            self.system_mode = target_mode
+            self.get_logger().info(f'Successfully switched from {old_mode} to {target_mode.value} mode')
+            return True
+    
+    ##################################
+    # End - Handler sequence for AppRequest (command_type: set_system_mode)
+    ##################################
+
+    ##################################
+    # Start - Handler sequence for AppRequest (command_type: set_system_mode -> maintenance mode handling)
+    # Handler for all maintenenance mode commands (manual_open_hatch, manual_close_hatch, manual_centre etc.)
+    ##################################
+
+    def handle_maintenance_command_sync(self, request):
+        """Handle maintenance commands - direct Arduino control"""
+
+        if self.system_mode != SystemMode.MAINTENANCE:
+            self.get_logger().error(f'Maintenance commands only available in maintenance mode. Current: {self.system_mode.value}')
+            return False
+        
+        command_map = {
+            'manual_open_hatch': 'manual_open_hatch',
+            'manual_close_hatch': 'manual_close_hatch',
+            'manual_centre': 'manual_centre',
+            'manual_uncentre': 'manual_uncentre',
+            'manual_enable_charge': 'manual_enable_charge',
+            'manual_disable_charge': 'manual_disable_charge'
+        }
+
+        arduino_command = command_map.get(request.command_type)
+        if not arduino_command:
+            self.get_logger().error(f'Unknown maintenance command: {request.command_type}')
+            return False
+        
+        self.get_logger().info(f'Executing maintenance command: {arduino_command}')
+
+        return self.send_maintenance_command_to_arduino_sync(arduino_command)
+    
+    def send_maintenance_command_to_arduino_sync(self, arduino_command):
+        """Send maintenance command to Arduino and wait for completion"""
+        success_event = threading.Event()
+        command_success = [False]
+        error_message = ['']
+
+        def arduino_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success:
+                    self.get_logger().info(f'Arduino maintenance command successful: {arduino_command} (state: {response.state:03b})')
+                    command_success[0] = True
+                else:
+                    self.get_logger().error(f'Arduino maintenance command failed: {arduino_command}')
+                    error_message[0] = f'Arduino rejected command - state: {response.state:03b}'
+            except Exception as e:
+                self.get_logger().error(f'Arduino maintenance command service call failed: {str(e)}')
+                error_message[0] = str(e)
+            finally:
+                success_event.set()
+
+        try:
+            # Create Arduino command request
+            arduino_request = BaseCommand.Request()
+            arduino_request.command = arduino_command
+            
+            future = self.station_command_client.call_async(arduino_request)
+            future.add_done_callback(arduino_callback)
+            
+            self.get_logger().info(f'Maintenance command sent to Arduino: {arduino_command} - waiting for completion...')
+            
+            # Wait for completion
+            if success_event.wait(timeout=30.0):
+                if command_success[0]:
+                    return True
+                else:
+                    self.get_logger().error(f'Maintenance command failed: {error_message[0]}')
+                    return False
+            else:
+                self.get_logger().error(f'Maintenance command timed out: {arduino_command}')
+                if not future.done():
+                    future.cancel()
+                return False
+                
+        except Exception as e:
+            self.get_logger().error(f'Failed to send maintenance command: {str(e)}')
+            return False
+
+    ##################################
+    # Start - Handler sequence for AppRequest (command_type: set_system_mode -> maintenance mode handling)
+    # Handler for all maintenenance mode commands (manual_open_hatch, manual_close_hatch, manual_centre etc.)
     ##################################
 
 ####################################################

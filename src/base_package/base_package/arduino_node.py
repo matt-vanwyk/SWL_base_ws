@@ -27,8 +27,14 @@ class ArduinoNode(Node):
         # self.ser.reset_input_buffer()
         # self.ser.reset_output_buffer()
 
-        # Global state variable to track bit mask state
-        self.current_state = 0
+        # Track individual component states
+        # Bit mapping: Bit 2=doors, Bit 1=arms, Bit 0=charger
+        self.doors_open = False      # Bit 2: 0=closed, 1=open
+        self.arms_centered = True    # Bit 1: 0=uncentered, 1=centered  
+        self.charger_on = True       # Bit 0: 0=off, 1=on
+
+        # Calculate initial combined state
+        self.current_state = self._calculate_combined_state()
 
         # Service server for base state machine
         self.base_command_server = self.create_service(
@@ -60,50 +66,170 @@ class ArduinoNode(Node):
     # SIMULATION
     #####################################
 
+    def _calculate_combined_state(self):
+        """Calculate the combined bit mask state from individual components"""
+        return (
+            (int(self.doors_open) << 2) |      # Bit 2: doors (0=closed, 1=open)
+            (int(self.arms_centered) << 1) |   # Bit 1: arms (0=uncentered, 1=centered)  
+            (int(self.charger_on) << 0)        # Bit 0: charger (0=off, 1=on)
+        )
+
+    def _update_component_states_from_mask(self, state_mask):
+        """Update individual component states from a combined bit mask"""
+        self.doors_open = bool(state_mask & 0b100)     # Extract bit 2
+        self.arms_centered = bool(state_mask & 0b010)  # Extract bit 1
+        self.charger_on = bool(state_mask & 0b001)   
+
     ########################################
     # START - HANDLERS FOR SERVICE CALLS FROM BASE_STATE_MACHINE
     ########################################
 
+    # def handle_station_command(self, request, response):
+    #     """Function to send desired state to Arduino"""
+    #     self.get_logger().info(f'Received command: {request.command}')
+        
+    #     try:
+    #         target_state = None
+            
+    #         if request.command == 'home_station':
+    #             target_state = 0b011  # Home position
+    #         elif request.command == 'prepare_for_takeoff':
+    #             target_state = 0b100  # Doors open, arms uncentered, charger off
+    #         elif request.command == 'secure_station':
+    #             target_state = 0b000 # Doors closed, arms uncentered, charger off
+    #         elif request.command == 'prepare_for_landing':
+    #             target_state = 0b100 # Doors open, arms uncentered, charger off
+    #         elif request.command == 'start_charging':
+    #             target_state = 0b011 # Doors closed, arms centred, charger on
+            
+    #         if target_state is not None:
+    #             # Send desired state to Arduino (simulated)
+    #             received_state = self.simulate_serial_communication(target_state)
+                
+    #             response.state = received_state
+    #             response.success = (received_state == target_state)
+                
+    #             if response.success:
+    #                 self.get_logger().info(f'Command succeeded - State: {received_state:03b}')
+    #             else:
+    #                 self.get_logger().warn(f'Command failed - Expected: {target_state:03b}, Got: {received_state:03b}')
+    #         else:
+    #             response.state = self.current_state
+    #             response.success = False
+    #             self.get_logger().warn(f'Unknown command: {request.command}')
+                
+    #     except Exception as e:
+    #         self.get_logger().error(f'Error handling command: {str(e)}')
+    #         response.state = self.current_state
+    #         response.success = False
+            
+    #     return response
+
     def handle_station_command(self, request, response):
-        """Function to send desired state to Arduino"""
+        """Function to send desired state to Arduino with stateful component control"""
         self.get_logger().info(f'Received command: {request.command}')
         
         try:
-            target_state = None
-            
+            # Handle different command types
             if request.command == 'home_station':
-                target_state = 0b011  # Home position
+                # Set all components to home state
+                self.doors_open = False    # Doors closed
+                self.arms_centered = True  # Arms centered
+                self.charger_on = True     # Charger on
+                self.get_logger().info('Setting all components to home state')
+                
             elif request.command == 'prepare_for_takeoff':
-                target_state = 0b100  # Doors open, arms uncentered, charger off
+                # Open doors, keep arms/charger as-is for takeoff
+                self.doors_open = True     # Doors open
+                self.arms_centered = False # Arms uncentered  
+                self.charger_on = False    # Charger off
+                self.get_logger().info('Preparing for takeoff: opening doors, uncentering arms, turning off charger')
+                
             elif request.command == 'secure_station':
-                target_state = 0b000 # Doors closed, arms uncentered, charger off
+                # Close doors for mission
+                self.doors_open = False    # Doors closed
+                self.arms_centered = False # Arms uncentered
+                self.charger_on = False    # Charger off
+                self.get_logger().info('Securing station: closing doors')
+                
             elif request.command == 'prepare_for_landing':
-                target_state = 0b100 # Doors open, arms uncentered, charger off
+                # Open doors for landing
+                self.doors_open = True     # Doors open
+                self.arms_centered = False # Arms uncentered
+                self.charger_on = False    # Charger off
+                self.get_logger().info('Preparing for landing: opening doors')
+                
             elif request.command == 'start_charging':
-                target_state = 0b011 # Doors closed, arms centred, charger on
-            
-            if target_state is not None:
-                # Send desired state to Arduino (simulated)
-                received_state = self.simulate_serial_communication(target_state)
+                # Setup for charging
+                self.doors_open = False    # Doors closed
+                self.arms_centered = True  # Arms centered
+                self.charger_on = True     # Charger on
+                self.get_logger().info('Starting charging: closing doors, centering arms, turning on charger')
                 
-                response.state = received_state
-                response.success = (received_state == target_state)
+            # MAINTENANCE COMMANDS - Only modify specific components
+            elif request.command == 'manual_open_hatch':
+                # Only toggle doors, preserve arms and charger
+                self.doors_open = True
+                self.get_logger().info(f'Manual command: opening hatch (preserving arms: {self.arms_centered}, charger: {self.charger_on})')
                 
-                if response.success:
-                    self.get_logger().info(f'Command succeeded - State: {received_state:03b}')
-                else:
-                    self.get_logger().warn(f'Command failed - Expected: {target_state:03b}, Got: {received_state:03b}')
+            elif request.command == 'manual_close_hatch':
+                # Only toggle doors, preserve arms and charger
+                self.doors_open = False
+                self.get_logger().info(f'Manual command: closing hatch (preserving arms: {self.arms_centered}, charger: {self.charger_on})')
+                
+            elif request.command == 'manual_centre':
+                # Only toggle arms, preserve doors and charger
+                self.arms_centered = True
+                self.get_logger().info(f'Manual command: centering arms (preserving doors: {self.doors_open}, charger: {self.charger_on})')
+                
+            elif request.command == 'manual_uncentre':
+                # Only toggle arms, preserve doors and charger  
+                self.arms_centered = False
+                self.get_logger().info(f'Manual command: uncentering arms (preserving doors: {self.doors_open}, charger: {self.charger_on})')
+                
+            elif request.command == 'manual_enable_charge':
+                # Only toggle charger, preserve doors and arms
+                self.charger_on = True
+                self.get_logger().info(f'Manual command: enabling charger (preserving doors: {self.doors_open}, arms: {self.arms_centered})')
+                
+            elif request.command == 'manual_disable_charge':
+                # Only toggle charger, preserve doors and arms
+                self.charger_on = False
+                self.get_logger().info(f'Manual command: disabling charger (preserving doors: {self.doors_open}, arms: {self.arms_centered})')
+                
             else:
-                response.state = self.current_state
+                self.get_logger().error(f'Unknown command: {request.command}')
                 response.success = False
-                self.get_logger().warn(f'Unknown command: {request.command}')
-                
-        except Exception as e:
-            self.get_logger().error(f'Error handling command: {str(e)}')
-            response.state = self.current_state
-            response.success = False
+                response.state = self.current_state
+                return response
             
-        return response
+            # Calculate the target state from individual components
+            target_state = self._calculate_combined_state()
+            
+            self.get_logger().info(f'Target state: {target_state:03b} (doors: {self.doors_open}, arms: {self.arms_centered}, charger: {self.charger_on})')
+            
+            # Send to Arduino
+            result_state = self.simulate_serial_communication(target_state)
+            
+            # Update current state and verify success
+            self.current_state = result_state
+            response.success = (result_state == target_state)
+            response.state = result_state
+            
+            if response.success:
+                self.get_logger().info(f'Command executed successfully. Final state: {result_state:03b}')
+            else:
+                self.get_logger().error(f'Command failed. Expected: {target_state:03b}, Got: {result_state:03b}')
+                # Update component states to match actual hardware state
+                self._update_component_states_from_mask(result_state)
+            
+            return response
+            
+        except Exception as e:
+            self.get_logger().error(f'Error executing command {request.command}: {str(e)}')
+            response.success = False
+            response.state = self.current_state
+            return response
     
     ########################################
     # END - HANDLERS FOR SERVICE CALLS FROM BASE_STATE_MACHINE

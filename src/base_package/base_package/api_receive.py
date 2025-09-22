@@ -24,7 +24,8 @@ class APIReceiveNode(Node):
         self.valid_commands = [
             'abort_mission', 'start_mission', 'pan',
             'manual_mode', 'reroute', 'return_to_base', 'reroute_mission',
-            'manual_open_hatch', 'manual_close_hatch', 'manual_centre', 'manual_uncentre', 'manual_enable_charge', 'manual_disable_charge'
+            'manual_open_hatch', 'manual_close_hatch', 'manual_centre', 'manual_uncentre', 'manual_enable_charge', 'manual_disable_charge',
+            'set_system_mode'
         ]
 
         self.get_logger().info("API Receive node started")
@@ -85,6 +86,7 @@ class APIReceiveNode(Node):
                     request = AppRequest.Request()
                     request.command_type = command_type
                     request.mission_id = data.get('mission_id', '')
+                    request.target_mode = data.get('target_mode', '')
                     
                     # Handle waypoints if present
                     waypoints_data = data.get('waypoints', [])
