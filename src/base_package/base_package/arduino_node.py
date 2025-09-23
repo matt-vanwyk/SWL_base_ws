@@ -14,20 +14,24 @@ class ArduinoNode(Node):
     def __init__(self):
         super().__init__('arduino_node')
 
-# TODO: USE ACTUAL SERIAL CONNECTION TO ARDUINO
-
-        # # Initialize serial connection
-        # self.value = "/dev/ttyUSB0"
-        # self.ser = serial.Serial(
-        #     port=self.value,
-        #     baudrate=9600,
-        #     bytesize=serial.EIGHTBITS,
-        #     parity=serial.PARITY_NONE,
-        #     stopbits=serial.STOPBITS_ONE,
-        #     timeout=1
-        # )
-        # self.ser.reset_input_buffer()
-        # self.ser.reset_output_buffer()
+        # Initialize serial connection
+        try:
+            self.value = "/dev/ttyUSB0"
+            self.ser = serial.Serial(
+                port=self.value,
+                baudrate=9600,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=1
+            )
+            self.ser.reset_input_buffer()
+            self.ser.reset_output_buffer()
+            self.get_logger().info(f'Serial connection established on {self.value}')
+        except Exception as e:
+            self.get_logger().error(f'Failed to connect to Arduino: {str(e)}')
+            self.get_logger().error('Falling back to simulation mode')
+            self.ser = None
 
         self.callback_group = ReentrantCallbackGroup()
 
@@ -76,7 +80,7 @@ class ArduinoNode(Node):
         #Test for successful moving of the station
         current_state = target_state
 
-        time.sleep(10.0) # Simulate station movement
+        time.sleep(5.0) # Simulate station movement
 
         #Test for station moving failure
         # current_state = 100000000000
@@ -85,6 +89,58 @@ class ArduinoNode(Node):
     #####################################
     # SIMULATION
     #####################################
+
+    def send_arduino_command(self, target_state):
+            """Send command to Arduino and receive response"""
+            if self.ser is None:
+                self.get_logger().warn('No serial connection - using simulation')
+                return self.simulate_serial_communication(target_state)
+            
+            try:
+                # Clear any existing data in the buffer
+                self.ser.reset_input_buffer()
+                self.ser.reset_output_buffer()
+                
+                # Send target state as a 3-bit binary string
+                command = f"{target_state:03b}\n"
+                self.ser.write(command.encode())
+                self.get_logger().info(f'Sent to Arduino: {command.strip()}')
+                
+                # Wait for Arduino to process and start movement
+                time.sleep(0.5)
+                
+                # Read all responses until we get the final STATE: response
+                final_state = None
+                timeout_counter = 0
+                max_timeout = 30  # 30 seconds max wait time
+                
+                while final_state is None and timeout_counter < max_timeout:
+                    if self.ser.in_waiting > 0:
+                        response = self.ser.readline().decode().strip()
+                        self.get_logger().info(f'Arduino: {response}')
+                        
+                        # Look for the final state response
+                        if response.startswith("STATE:"):
+                            state_str = response.split(":")[1]
+                            if len(state_str) == 3 and all(c in '01' for c in state_str):
+                                final_state = int(state_str, 2)
+                                self.get_logger().info(f'Arduino movement completed - Final state: {final_state:03b}')
+                            else:
+                                self.get_logger().error(f'Invalid state format: {state_str}')
+                                break
+                    else:
+                        time.sleep(0.5)
+                        timeout_counter += 1
+                
+                if final_state is not None:
+                    return final_state
+                else:
+                    self.get_logger().error('Arduino communication timeout - falling back to simulation')
+                    return self.simulate_serial_communication(target_state)
+                
+            except Exception as e:
+                self.get_logger().error(f'Serial communication error: {str(e)}')
+                return self.simulate_serial_communication(target_state)
 
     def _calculate_combined_state(self):
         """Calculate the combined bit mask state from individual components"""
@@ -125,47 +181,6 @@ class ArduinoNode(Node):
     ########################################
     # START - HANDLERS FOR SERVICE CALLS FROM BASE_STATE_MACHINE
     ########################################
-
-    # def handle_station_command(self, request, response):
-    #     """Function to send desired state to Arduino"""
-    #     self.get_logger().info(f'Received command: {request.command}')
-        
-    #     try:
-    #         target_state = None
-            
-    #         if request.command == 'home_station':
-    #             target_state = 0b011  # Home position
-    #         elif request.command == 'prepare_for_takeoff':
-    #             target_state = 0b100  # Doors open, arms uncentered, charger off
-    #         elif request.command == 'secure_station':
-    #             target_state = 0b000 # Doors closed, arms uncentered, charger off
-    #         elif request.command == 'prepare_for_landing':
-    #             target_state = 0b100 # Doors open, arms uncentered, charger off
-    #         elif request.command == 'start_charging':
-    #             target_state = 0b011 # Doors closed, arms centred, charger on
-            
-    #         if target_state is not None:
-    #             # Send desired state to Arduino (simulated)
-    #             received_state = self.simulate_serial_communication(target_state)
-                
-    #             response.state = received_state
-    #             response.success = (received_state == target_state)
-                
-    #             if response.success:
-    #                 self.get_logger().info(f'Command succeeded - State: {received_state:03b}')
-    #             else:
-    #                 self.get_logger().warn(f'Command failed - Expected: {target_state:03b}, Got: {received_state:03b}')
-    #         else:
-    #             response.state = self.current_state
-    #             response.success = False
-    #             self.get_logger().warn(f'Unknown command: {request.command}')
-                
-    #     except Exception as e:
-    #         self.get_logger().error(f'Error handling command: {str(e)}')
-    #         response.state = self.current_state
-    #         response.success = False
-            
-    #     return response
 
     def handle_station_command(self, request, response):
         """Function to send desired state to Arduino with stateful component control"""
@@ -252,7 +267,7 @@ class ArduinoNode(Node):
             self.get_logger().info(f'Target state: {target_state:03b} (doors: {self.doors_open}, arms: {self.arms_centered}, charger: {self.charger_on})')
             
             # Send to Arduino
-            result_state = self.simulate_serial_communication(target_state)
+            result_state = self.send_arduino_command(target_state)
             
             # Update current state and verify success
             self.current_state = result_state
@@ -277,6 +292,12 @@ class ArduinoNode(Node):
     ########################################
     # END - HANDLERS FOR SERVICE CALLS FROM BASE_STATE_MACHINE
     ########################################
+
+    def __del__(self):
+        """Clean up serial connection"""
+        if hasattr(self, 'ser') and self.ser and self.ser.is_open:
+            self.ser.close()
+            self.get_logger().info('Serial connection closed')
     
 def main():
     rclpy.init()
