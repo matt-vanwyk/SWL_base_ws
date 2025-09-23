@@ -5,8 +5,10 @@ import threading
 import time
 import rclpy
 from rclpy.node import Node
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from swl_base_interfaces.srv import BaseCommand
+from std_msgs.msg import String
 
 class ArduinoNode(Node):
     def __init__(self):
@@ -27,6 +29,8 @@ class ArduinoNode(Node):
         # self.ser.reset_input_buffer()
         # self.ser.reset_output_buffer()
 
+        self.callback_group = ReentrantCallbackGroup()
+
         # Track individual component states
         # Bit mapping: Bit 2=doors, Bit 1=arms, Bit 0=charger
         self.doors_open = False      # Bit 2: 0=closed, 1=open
@@ -42,6 +46,22 @@ class ArduinoNode(Node):
             '/base_station/command',
             self.handle_station_command
         )
+
+        # Publisher for hardware state (for api_post node)
+        self.hardware_state_publisher = self.create_publisher(
+            String,
+            '/arduino/hardware_state',
+            10
+        )
+
+        # Timer for publishing hardware state
+        self.state_publish_timer = self.create_timer(
+            1.0,  # Publish every 1 second
+            self.publish_hardware_state,
+            callback_group=self.callback_group
+        )
+
+        self.current_system_mode = "manual"  # Default
 
         self.get_logger().info('Arduino node has started')
         self.get_logger().info(f'Initial state: {self.current_state:03b}')
@@ -79,6 +99,28 @@ class ArduinoNode(Node):
         self.doors_open = bool(state_mask & 0b100)     # Extract bit 2
         self.arms_centered = bool(state_mask & 0b010)  # Extract bit 1
         self.charger_on = bool(state_mask & 0b001)   
+
+    def publish_hardware_state(self):
+        """Publish current hardware state and system mode"""
+        # Create state message: "mode:maintenance,state:101"
+        state_msg = String()
+        state_msg.data = f"mode:{self.current_system_mode},state:{self.current_state:03b}"
+        
+        self.hardware_state_publisher.publish(state_msg)
+        
+        # Debug log (optional - can be removed later)
+        self.get_logger().debug(f'Published hardware state: {state_msg.data}')
+
+    def update_system_mode_from_command(self, command):
+        """Infer system mode from command type"""
+        if command.startswith('manual_'):
+            self.current_system_mode = "maintenance"
+        elif command in ['home_station', 'prepare_for_takeoff', 'secure_station', 
+                        'prepare_for_landing', 'start_charging']:
+            # These are mission-related commands, likely manual or autonomous mode
+            # For now, assume manual mode unless we get explicit mode info
+            if self.current_system_mode == "maintenance":
+                self.current_system_mode = "manual"  # Exiting maintenance
 
     ########################################
     # START - HANDLERS FOR SERVICE CALLS FROM BASE_STATE_MACHINE
@@ -130,6 +172,7 @@ class ArduinoNode(Node):
         self.get_logger().info(f'Received command: {request.command}')
         
         try:
+            self.update_system_mode_from_command(request.command)
             # Handle different command types
             if request.command == 'home_station':
                 # Set all components to home state

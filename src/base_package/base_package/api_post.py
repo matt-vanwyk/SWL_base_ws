@@ -6,7 +6,8 @@ import json
 import websockets
 import threading
 from rclpy.node import Node
-from swl_shared_interfaces.msg import DroneState
+from swl_shared_interfaces.msg import DroneState, BaseState
+from std_msgs.msg import String
 
 class APIPostNode(Node):
     def __init__(self):
@@ -17,6 +18,20 @@ class APIPostNode(Node):
             DroneState,
             'drone/state',
             self.drone_state_callback,
+            10
+        )
+
+        self.base_state_subscriber = self.create_subscription(
+            BaseState,
+            'base/state',
+            self.base_state_callback,
+            10
+        )
+
+        self.hardware_state_subscriber = self.create_subscription(
+            String,
+            '/arduino/hardware_state',
+            self.hardware_state_callback,
             10
         )
 
@@ -31,6 +46,13 @@ class APIPostNode(Node):
         self.coordinates_sent = False
         self.connected_clients = set()  # Track all connected WebSocket clients
         self.asyncio_loop = None
+
+        self.current_base_state = "Unknown"
+        self.current_system_mode = "manual"
+        self.current_hardware_state = "000"
+        self.doors_open = False
+        self.arms_centered = False
+        self.charger_on = False
 
         # WebSocket server
         self.websocket_server = None
@@ -77,6 +99,32 @@ class APIPostNode(Node):
 
         self.last_drone_state = msg
 
+    def base_state_callback(self, msg):
+        """Receive base state machine updates"""
+        self.current_base_state = msg.current_state
+        self.get_logger().debug(f'Base state updated: {self.current_base_state}')
+
+    def hardware_state_callback(self, msg):
+        """Receive hardware state updates from Arduino node"""
+        try:
+            # Parse hardware state message: "mode:maintenance,state:101"
+            parts = msg.data.split(',')
+            for part in parts:
+                key, value = part.split(':')
+                if key == 'mode':
+                    self.current_system_mode = value
+                elif key == 'state':
+                    self.current_hardware_state = value
+                    # Parse individual components from bit mask
+                    state_int = int(value, 2) if len(value) == 3 and all(c in '01' for c in value) else int(value)
+                    self.doors_open = bool(state_int & 0b100)
+                    self.arms_centered = bool(state_int & 0b010) 
+                    self.charger_on = bool(state_int & 0b001)
+                    
+            self.get_logger().debug(f'Hardware state updated: {msg.data}')
+        except Exception as e:
+            self.get_logger().error(f'Failed to parse hardware state: {str(e)}')
+
     async def broadcast_telemetry_to_all_clients(self, drone_state_msg):
         """Stream telemetry data to all connected clients"""
         if not self.connected_clients:
@@ -102,6 +150,16 @@ class APIPostNode(Node):
                 "current_yaw": drone_state_msg.current_yaw,
                 "mission_complete": drone_state_msg.mission_complete,
                 "current_state": drone_state_msg.current_state
+            },
+            "base_station": {
+                "system_mode": self.current_system_mode,
+                "base_state": self.current_base_state,
+                "hardware_state": self.current_hardware_state,
+                "hardware_components": {
+                    "doors_open": self.doors_open,
+                    "arms_centered": self.arms_centered,
+                    "charger_on": self.charger_on
+                }
             },
             "timestamp": self.get_clock().now().to_msg().sec
         }
@@ -192,6 +250,16 @@ class APIPostNode(Node):
                         "current_yaw": self.last_drone_state.current_yaw,
                         "mission_complete": self.last_drone_state.mission_complete,
                         "current_state": self.last_drone_state.current_state
+                    },
+                    "base_station": {
+                        "system_mode": self.current_system_mode,
+                        "base_state": self.current_base_state,
+                        "hardware_state": self.current_hardware_state,
+                        "hardware_components": {
+                            "doors_open": self.doors_open,
+                            "arms_centered": self.arms_centered,
+                            "charger_on": self.charger_on
+                        }
                     },
                     "timestamp": self.get_clock().now().to_msg().sec
                 }
