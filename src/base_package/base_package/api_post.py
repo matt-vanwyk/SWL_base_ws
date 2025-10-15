@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import rclpy
+import time
 import asyncio
 import json
 import websockets
@@ -214,6 +215,8 @@ class APIPostNode(Node):
         """Handle incoming WebSocket connections and messages"""
         self.get_logger().info(f"New WebSocket connection from {websocket.remote_address}")
         
+        last_ping = time.time()
+
         try:
             # Add client to connected set
             self.connected_clients.add(websocket)
@@ -264,19 +267,38 @@ class APIPostNode(Node):
                     "timestamp": self.get_clock().now().to_msg().sec
                 }
                 await websocket.send(json.dumps(telemetry_data))
+
+            async def ping_client():
+                while True:
+                    try:
+                        pong_waiter = await websocket.ping()
+                        await asyncio.wait_for(pong_waiter, timeout=10)
+                        self.get_logger().debug(f"Ping successful to {websocket.remote_address}")
+                        await asyncio.sleep(5)  # Ping every 5 seconds
+                    except asyncio.TimeoutError:
+                        self.get_logger().warning(f"Ping timeout to {websocket.remote_address}")
+                        break
+                    except Exception as e:
+                        self.get_logger().error(f"Ping error: {str(e)}")
+                        break
+        
+            # Start ping task
+            ping_task = asyncio.create_task(ping_client())
             
             # Keep connection alive
             async for message in websocket:
                 # Handle any incoming messages if needed
-                self.get_logger().debug(f"Received message from client: {message}")
+                last_message_time = time.time()
+                self.get_logger().debug(f"Received message from client at {last_message_time}")
                     
-        except websockets.exceptions.ConnectionClosed:
-            self.get_logger().info(f"WebSocket connection closed for {websocket.remote_address}")
+        except websockets.exceptions.ConnectionClosed as e:
+            self.get_logger().warning(f"WebSocket connection closed: {e.code} - {e.reason}")
         except Exception as e:
             self.get_logger().error(f"WebSocket error: {str(e)}")
         finally:
             # Remove client from connected set
             self.connected_clients.discard(websocket)
+            ping_task.cancel()
 
     async def send_coordinates_to_client(self, websocket):
         """Send base coordinates to a specific client"""

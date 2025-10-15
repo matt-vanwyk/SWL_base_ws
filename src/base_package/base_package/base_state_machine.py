@@ -231,6 +231,7 @@ class BaseStationStateMachine(Node):
             self.get_logger().info('Drone charging complete - preparing station for next mission')
             self.station_charging_complete_in_progress = True
             self.state_machine.prepare_station_for_next_mission()
+            self.station_charging_complete_in_progress = False
 
 # METHOD TO PUBLISH BASE STATE TO DRONE STATE MACHINE
     def publish_base_state(self):
@@ -498,9 +499,9 @@ class BaseStationStateMachine(Node):
             return False
         
         # Step 3: Safety checks
-        if self.current_drone_state.battery_percentage < 90.0:
-            self.get_logger().error(f'Cannot start mission - drone battery too low: {self.current_drone_state.battery_percentage:.1f}%')
-            return False
+        # if self.current_drone_state.battery_percentage < 90.0:
+        #     self.get_logger().error(f'Cannot start mission - drone battery too low: {self.current_drone_state.battery_percentage:.1f}%')
+        #     return False
         
         # Step 4: Validate mission data
         if not request.mission_id or len(request.mission_id.strip()) == 0:

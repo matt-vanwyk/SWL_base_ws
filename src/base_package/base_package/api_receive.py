@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import rclpy
+import time
 import threading
 import asyncio
 import json
@@ -58,9 +59,29 @@ class APIReceiveNode(Node):
         """Handle incoming WebSocket connections and messages"""
         self.get_logger().info(f"New WebSocket connection from {websocket.remote_address}")
         
+        last_ping = time.time()
+
         try:
+
+            async def ping_client():
+                while True:
+                    try:
+                        pong_waiter = await websocket.ping()
+                        await asyncio.wait_for(pong_waiter, timeout=10)
+                        self.get_logger().debug(f"Ping successful to {websocket.remote_address}")
+                        await asyncio.sleep(5)
+                    except asyncio.TimeoutError:
+                        self.get_logger().warning(f"Ping timeout to {websocket.remote_address}")
+                        break
+                    except Exception as e:
+                        self.get_logger().error(f"Ping error: {str(e)}")
+                        break
+
+            ping_task = asyncio.create_task(ping_client())
+
             async for message in websocket:
-                self.get_logger().info("Received WebSocket message")
+                last_message_time = time.time()
+                self.get_logger().info(f"Received WebSocket message at {last_message_time}")
                 
                 try:
                     # Parse the JSON message
@@ -129,6 +150,10 @@ class APIReceiveNode(Node):
             self.get_logger().info(f"WebSocket connection closed for {websocket.remote_address}")
         except Exception as e:
             self.get_logger().error(f"WebSocket error: {str(e)}")
+        except websockets.exceptions.ConnectionClosed as e:
+            self.get_logger().warning(f"WebSocket connection closed: {e.code} - {e.reason}")
+        finally:
+            ping_task.cancel()
 
 async def spin(node: Node):
     def _spin_func():

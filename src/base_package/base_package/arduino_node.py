@@ -16,7 +16,7 @@ class ArduinoNode(Node):
 
         # Initialize serial connection
         try:
-            self.value = "/dev/ttyUSB0"
+            self.value = "/dev/arduino_base"
             self.ser = serial.Serial(
                 port=self.value,
                 baudrate=9600,
