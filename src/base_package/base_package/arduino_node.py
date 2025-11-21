@@ -112,7 +112,7 @@ class ArduinoNode(Node):
                 # Read all responses until we get the final STATE: response
                 final_state = None
                 timeout_counter = 0
-                max_timeout = 30  # 30 seconds max wait time
+                max_timeout = 120  # 120 seconds max wait time
                 
                 while final_state is None and timeout_counter < max_timeout:
                     if self.ser.in_waiting > 0:
