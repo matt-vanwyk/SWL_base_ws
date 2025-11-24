@@ -164,6 +164,11 @@ class BaseStationStateMachine(Node):
     def can_switch_to_mode(self, target_mode: SystemMode) -> bool:
         """Check if mode switch is safe given current system state"""
 
+        #TODO Remove!!
+        if target_mode == SystemMode.MAINTENANCE:
+            self.get_logger().warn('TEMP BYPASS: allowing switch to MAINTENANCE without drone/state checks.')
+            return True
+
         current_base_state = self.state_machine.current_state.name
         current_drone_state = self.current_drone_state.current_state if self.current_drone_state else None
 
