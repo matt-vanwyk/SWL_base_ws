@@ -23,7 +23,7 @@ class APIReceiveNode(Node):
 
         # Validate the command type
         self.valid_commands = [
-            'abort_mission', 'start_mission', 'pan',
+            'abort_mission', 'start_mission', 'pan', 'tilt',
             'manual_mode', 'reroute', 'return_to_base', 'reroute_mission',
             'manual_open_hatch', 'manual_close_hatch', 'manual_centre', 'manual_uncentre', 'manual_enable_charge', 'manual_disable_charge',
             'set_system_mode'
@@ -121,6 +121,7 @@ class APIReceiveNode(Node):
                         request.waypoints.append(waypoint)
 
                     request.yaw_cw = float(data.get('yaw_cw', 0.0)) 
+                    request.pitch_degrees = float(data.get('pitch_degrees', 0.0))
                     
                     # Make the service call
                     self.get_logger().info(f"Making service call with command: {request.command_type}")

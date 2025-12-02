@@ -462,6 +462,8 @@ class BaseStationStateMachine(Node):
             response.success = self.handle_start_mission_sync(request)
         elif request.command_type == 'pan':
             response.success = self.handle_pan(request)
+        elif request.command_type == 'tilt':
+            response.success = self.handle_tilt(request)
         elif request.command_type == 'return_to_base':
             response.success = self.handle_return_to_base_sync(request)
         elif request.command_type == 'abort_mission':
@@ -678,7 +680,50 @@ class BaseStationStateMachine(Node):
         future = self.drone_command_client.call_async(drone_request)
         future.add_done_callback(pan_callback)
 
-        self.get_logger().info(f'Pan command sent to drone: {request.yaw_cw}°')
+        self.get_logger().info(f'Pan command sent to gimbal: {request.yaw_cw}°')
+        return True
+
+    def handle_tilt(self, request):
+        """Validate drone state before panning and sending command to drone"""
+        # Step 1: Validate drone state
+        if self.current_drone_state is None:
+            self.get_logger().warn('No current drone state. Is drone connected?')
+            return False
+        
+        # TODO ADD BACK!!!! Step 2: Check drone state is Mission_In_Progress
+        # if self.current_drone_state.current_state != 'Mission in progress':
+        #     self.get_logger().error(f'Drone must be in Mission in Progress state - current: {self.current_drone_state.current_state}')
+        #     return False
+        
+        # Validate yaw_cw field
+        if request.pitch_degrees == 0.0:
+            self.get_logger().error('Invalid yaw_cw value - must be non-zero')
+            return False
+        
+        # Limit yaw to reasonable range
+        if abs(request.pitch_degrees) > 180.0:
+            self.get_logger().error(f'Yaw value too large: {request.yaw_cw}° (max ±180°)')
+            return False
+        
+        drone_request = DroneCommand.Request()
+        drone_request.command_type = request.command_type  # 'tilt'
+        drone_request.drone_id = self.current_drone_state.drone_id
+        drone_request.pitch_degrees = request.pitch_degrees
+
+        def tilt_callback(future):
+            try:
+                response = future.result()
+                if response.success:
+                    self.get_logger().info('Pan command received at drone state machine')
+                else:
+                    self.get_logger().warn('Failed to send pan command to drone state machine')
+            except Exception as e:
+                self.get_logger().error(f'Pan service call to drone state machine failed: {str(e)}')
+        
+        future = self.drone_command_client.call_async(drone_request)
+        future.add_done_callback(tilt_callback)
+
+        self.get_logger().info(f'Tilt command sent to gimbal: {request.yaw_cw}°')
         return True
 
     ##################################

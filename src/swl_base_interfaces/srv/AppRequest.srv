@@ -4,6 +4,7 @@ string command_type
 swl_shared_interfaces/Waypoint[] waypoints
 string mission_id
 float64 yaw_cw
+float64 pitch_degrees
 string target_mode
 ---
 bool success
