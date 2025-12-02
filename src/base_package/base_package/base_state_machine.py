@@ -645,10 +645,10 @@ class BaseStationStateMachine(Node):
             self.get_logger().warn('No current drone state. Is drone connected?')
             return False
         
-        #Step 2: Check drone state is Mission_In_Progress
-        if self.current_drone_state.current_state != 'Mission in progress':
-            self.get_logger().error(f'Drone must be in Mission in Progress state - current: {self.current_drone_state.current_state}')
-            return False
+        # TODO ADD BACK!!!! Step 2: Check drone state is Mission_In_Progress
+        # if self.current_drone_state.current_state != 'Mission in progress':
+        #     self.get_logger().error(f'Drone must be in Mission in Progress state - current: {self.current_drone_state.current_state}')
+        #     return False
         
         # Validate yaw_cw field
         if request.yaw_cw == 0.0:
