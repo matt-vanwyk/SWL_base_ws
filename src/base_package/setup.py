@@ -24,7 +24,8 @@ setup(
             'api_post = base_package.api_post:main',
             'base_state_machine = base_package.base_state_machine:main',
             'arduino_node = base_package.arduino_node:main',
-            'connection_monitor = base_package.connection_monitor:main'
+            'connection_monitor = base_package.connection_monitor:main',
+            'video_streamer = base_package.video_streamer_node:main',
         ],
     },
 )
